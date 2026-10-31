@@ -34,7 +34,7 @@ redone when only a box or a step changes.
 
 ```sh
 ADRD="python3 tool/scripts/adrd.py"
-S=sessions/union-ai-20261023-1524
+S=sessions/my-app-20261031-1524
 
 $ADRD new     --project /path/to/flutter/app   # creates the session
 $ADRD flow    --session $S                     # routes + modules, read statically

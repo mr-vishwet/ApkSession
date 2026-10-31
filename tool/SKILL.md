@@ -21,7 +21,7 @@ removed. The app source is **never modified** — read only, plus an optional th
 ## What you are driving
 
 ```
-ADRD="/Users/appristine/Desktop/Vishwet/Experiments/ApkSession/adrd"
+ADRD="$PWD/adrd"   # the repo root wrapper; run ./setup.sh first
 ```
 
 That wrapper runs the pinned `.venv`; the tool breaks if you call `python3` directly
