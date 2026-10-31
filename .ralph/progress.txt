@@ -35,3 +35,30 @@ Spec: tasks/prd-apksession-device-ingest.md
 ## Log
 
 _Append entries below. Never rewrite this file._
+
+## [2026-10-31 21:32] - US-001
+- Scaffolded `ingest/android/` as a standalone Gradle project: Kotlin 2.0.21, AGP 8.7.3, Gradle 8.14,
+  Compose BOM 2024.12.01, Material 3, minSdk 26, targetSdk 35, namespace `dev.mrvishwet.adrd.ingest`.
+  One ComponentActivity, one Compose screen, one placeholder unit test.
+- Files: settings.gradle.kts, build.gradle.kts, gradle.properties, gradle/libs.versions.toml,
+  app/build.gradle.kts, app/src/main/AndroidManifest.xml, res/values/themes.xml, MainActivity.kt,
+  PlaceholderTest.kt, .gitignore, gradle wrapper (jar copied from an existing project).
+- Gates: `./gradlew assembleDebug`, `test`, `lintDebug` all BUILD SUCCESSFUL.
+- APK verified statically with aapt2: package, minSdkVersion 26, targetSdkVersion 35,
+  launchable-activity MainActivity, and MainActivity present in classes.dex.
+- Learnings for future iterations:
+  - **This machine cannot run an emulator.** No emulator binary, no system-images dir, no AVDs, and
+    `adb devices` is empty. Every "verify on demo35" acceptance criterion in this PRD is unsatisfiable
+    as written. Verify by building the APK and inspecting it with aapt2 + dexdump instead, and say
+    plainly that runtime proof is owed. Do not write a progress note claiming a screen was seen.
+  - Gradle 8.14 (`-all`) is already cached in ~/.gradle/wrapper/dists, so pointing the wrapper there
+    avoids a large download. JDK 21 is installed; the module targets jvmTarget 17 and that combination
+    works.
+  - AGP 8.7.3 + Kotlin 2.0.21 + the `org.jetbrains.kotlin.plugin.compose` plugin is a working set here.
+    Compose is enabled via `buildFeatures { compose = true }`; there is no separate composeOptions
+    compiler version any more.
+  - In Kotlin DSL, `unitTests.returnDefaultValues` does not resolve. Use `unitTests.isReturnDefaultValues`
+    or drop the block.
+  - Create a source directory before writing into it with a heredoc, or the file silently is not created.
+  - `tool/tests/run.sh` printed `PASS` before this work and the tool directory was not touched.
+---
