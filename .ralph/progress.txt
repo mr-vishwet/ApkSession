@@ -62,3 +62,26 @@ _Append entries below. Never rewrite this file._
   - Create a source directory before writing into it with a heredoc, or the file silently is not created.
   - `tool/tests/run.sh` printed `PASS` before this work and the tool directory was not touched.
 ---
+
+## [2026-10-31 23:44] - US-002
+- Chunked upload endpoints on the EXISTING dashboard server (tool/scripts/adrd/watch.py gained
+  do_POST/do_PUT and a GET status branch; all disk logic lives in the new tool/scripts/adrd/ingest.py).
+- Routes: POST /ingest/<session>/init (idempotent by deterministic upload_id = first 16 hex of
+  sha256(filename+sha256)), PUT /ingest/<session>/<id>/chunk/<n>, GET .../status, POST .../complete.
+  Files land only under sessions/<id>/ingest/ (uploads/<id>/chunks/<n>, assembled to ingest/<filename>).
+- Rejection behaviour: body longer than chunk_size is refused 413 BEFORE being read; body whose length
+  is not exactly the expected chunk length gets 400; both leave already-stored chunks untouched
+  (chunks are written temp + fsync + rename, and status counts a chunk present only at exact size).
+  complete 409s naming missing ranges ("2-4,6"), 409s loudly on sha256 mismatch and keeps chunks for
+  diagnosis. filename with a separator or .. -> 403, matching the existing traversal test style.
+  Every route passes through the existing _authed token gate; Handler.timeout=30 added so a stalled
+  chunk PUT cannot wedge the single-threaded serve loop (this bit us during test bring-up).
+- Commands run: `.venv/bin/python -m pytest tool/tests/test_ingest.py -q` -> 15 passed in 7.8s;
+  `./tool/tests/run.sh` (full suite incl. new "== ingest chunk endpoints ==" live round trip + pytest
+  call) -> last line `PASS  artifacts in /tmp/adrd-selftest.Lcsn/sessions/fixture-app-20261031-2339`.
+- Learnings: pytest was NOT in the pinned .venv; installed pytest 9.2.0 with
+  `.venv/bin/python -m pip install pytest`. run.sh now depends on it for the ingest section.
+  A raw-socket test that lies about Content-Length must half-close (SHUT_WR) or the server blocks
+  waiting for bytes it was told would arrive.
+---
+

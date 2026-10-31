@@ -42,8 +42,8 @@
         "./tool/tests/run.sh prints PASS"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-10-31 on the host, no device involved. Routes added to the existing dashboard server in tool/scripts/adrd/watch.py (do_POST/do_PUT + GET status branch); all disk logic in new tool/scripts/adrd/ingest.py. upload_id is deterministic (sha256(filename+sha256) first 16 hex) so init is idempotent by construction; chunks stored at ingest/uploads/<id>/chunks/<n> via temp+fsync+rename; oversize body refused with 413 before being read (body length > chunk_size), wrong-length body refused with 400; complete assembles in index order streaming sha256, returns 409 naming missing ranges, and 409s loudly on sha mismatch keeping chunks for diagnosis; filename with a separator or .. gets 403; every route passes the existing token gate. Tests: tool/tests/test_ingest.py (15 pytest cases, all passing in 7.8s via .venv/bin/python -m pytest) and an ingest round trip + pytest invocation added to tool/tests/run.sh, which printed PASS end to end. pytest 9.2.0 was pip-installed into .venv to run the suite."
     },
     {
       "id": "US-003",

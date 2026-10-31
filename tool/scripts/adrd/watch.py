@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import ingest as IN
 from .session import Session
 
 BOUNDARY = "adrdframe"
@@ -288,6 +289,7 @@ bind requires the token in the URL.</p>"""
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "adrd/1"
+    timeout = 30  # a stalled chunk PUT must never wedge the single-threaded serve loop
 
     def log_message(self, *a):  # keep the console readable during a take
         pass
@@ -351,7 +353,110 @@ class Handler(BaseHTTPRequestHandler):
         if parts and parts[0] == "s" and len(parts) >= 2:
             return self._session_route(parts[1], parts[2] if len(parts) > 2 else "",
                                        parts[3:], q)
+        if parts and parts[0] == "ingest":
+            return self._ingest_get(parts, q)
         return self._send(404, b"not found", "text/plain")
+
+    # ---- chunked ingest routes (US-002): /ingest/<session>/... ------------------
+
+    def _ingest_session(self, name: str, q: dict) -> Path | None:
+        """Session lookup plus the same token gate every other route uses; None = answered."""
+        root = self._session(name)
+        if root is None:
+            self._send(404, b"no such session", "text/plain")
+            return None
+        if not self._authed(q):
+            self._send(401, b"token required (see the URL adrd printed)", "text/plain")
+            return None
+        return root
+
+    def _ingest_get(self, parts: list[str], q: dict) -> None:
+        if len(parts) == 4 and parts[3] == "status":
+            root = self._ingest_session(parts[1], q)
+            if root is None:
+                return
+            code, out = IN.status(root, parts[2])
+            return self._send(code, json.dumps(out).encode(), "application/json")
+        return self._send(404, b"not found", "text/plain")
+
+    def _json_body(self) -> bytes | None:
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return b""
+        if n < 0 or n > IN.MAX_JSON:
+            return None
+        return self.rfile.read(n)
+
+    def _drain(self, limit: int) -> None:
+        got = 0
+        while got < limit:
+            block = self.rfile.read(min(65536, limit - got))
+            if not block:
+                break
+            got += len(block)
+
+    def do_POST(self) -> None:
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        parts = [unquote(p) for p in u.path.split("/") if p]
+        if not parts or parts[0] != "ingest" or len(parts) < 3:
+            return self._send(404, b"not found", "text/plain")
+        root = self._ingest_session(parts[1], q)
+        if root is None:
+            return
+        body = self._json_body()
+        if body is None:
+            return self._send(413, b"json body too large", "text/plain")
+        if parts[2] == "init" and len(parts) == 3:
+            try:
+                payload = json.loads(body or b"{}")
+            except ValueError:
+                return self._send(400, b'{"error":"body must be json"}', "application/json")
+            if not isinstance(payload, dict):
+                return self._send(400, b'{"error":"body must be a json object"}',
+                                  "application/json")
+            code, out = IN.init(root, payload)
+            return self._send(code, json.dumps(out).encode(), "application/json")
+        if len(parts) == 4 and parts[3] == "complete":
+            code, out = IN.complete(root, parts[2])
+            return self._send(code, json.dumps(out).encode(), "application/json")
+        return self._send(404, b"not found", "text/plain")
+
+    def do_PUT(self) -> None:
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        parts = [unquote(p) for p in u.path.split("/") if p]
+        if not parts or parts[0] != "ingest" or len(parts) != 5 or parts[3] != "chunk":
+            return self._send(404, b"not found", "text/plain")
+        root = self._ingest_session(parts[1], q)
+        if root is None:
+            return
+        try:
+            n = int(parts[4])
+        except ValueError:
+            return self._send(400, b"chunk index must be an integer", "text/plain")
+        meta = IN.load_meta(root, parts[2])
+        if meta is None:
+            return self._send(404, json.dumps({"error": "unknown upload"}).encode(),
+                              "application/json")
+        try:
+            cl = int(self.headers.get("Content-Length") or -1)
+        except ValueError:
+            cl = -1
+        if cl < 0:
+            return self._send(411, b"content-length required", "text/plain")
+        # reject an oversize body before reading it, so a bad client cannot balloon the heap
+        if cl > meta["chunk_size"]:
+            self._drain(min(cl, 4 * 1024 * 1024))  # consume a little so the 413 lands
+            return self._send(413, json.dumps(
+                {"error": f"body {cl} exceeds chunk_size {meta['chunk_size']}"}).encode(),
+                "application/json")
+        data = self.rfile.read(cl)
+        if len(data) != cl:
+            return self._send(400, b"truncated body", "text/plain")
+        code, out = IN.put_chunk(root, parts[2], n, data)
+        self._send(code, json.dumps(out).encode(), "application/json")
 
     def _session_route(self, name: str, what: str, rest: list[str], q: dict) -> None:
         root = self._session(name)

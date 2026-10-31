@@ -206,6 +206,52 @@ check $? "state semantics" || true
 
 got=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$B/s/$N/stream?t=$TOK")
 if [ "$got" = 200 ]; then echo "  ok   live view falls back to a still with no device"; else echo "  FAIL live view fallback (got $got)"; fails=$((fails+1)); fi
+
+echo "== ingest chunk endpoints =="
+# the routes live in the same server this watch process is running, so exercise them here
+"$PY" - "$B" "$N" "$TOK" "$SESS" <<'PYI'
+import hashlib, json, pathlib, sys, urllib.request
+B, N, TOK, sess = sys.argv[1], sys.argv[2], sys.argv[3], pathlib.Path(sys.argv[4])
+src = bytes((i * 37 + 11) & 0xFF for i in range(3000))
+CS = 1024
+
+def call(method, path, body=None, raw=None):
+    data = json.dumps(body).encode() if body is not None else raw
+    req = urllib.request.Request(B + path + f"?t={TOK}", data=data, method=method)
+    try:
+        r = urllib.request.urlopen(req, timeout=5)
+        return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+
+code, out = call("POST", f"/ingest/{N}/init",
+                 {"filename": "clip.bin", "size": len(src),
+                  "sha256": hashlib.sha256(src).hexdigest(), "chunk_size": CS})
+assert code == 200, out
+uid = out["upload_id"]
+again = call("POST", f"/ingest/{N}/init",
+             {"filename": "clip.bin", "size": len(src),
+              "sha256": hashlib.sha256(src).hexdigest(), "chunk_size": CS})
+assert again[1]["reused"] and again[1]["upload_id"] == uid, again
+assert call("POST", f"/ingest/{N}/init",
+            {"filename": "../evil", "size": 0,
+             "sha256": hashlib.sha256(b"").hexdigest(), "chunk_size": CS})[0] == 403
+for n in (2, 0, 1):  # out of order, then chunk 1 again to prove idempotence
+    assert call("PUT", f"/ingest/{N}/{uid}/chunk/{n}",
+                raw=src[n * CS:(n + 1) * CS])[0] == 200
+assert call("PUT", f"/ingest/{N}/{uid}/chunk/1", raw=src[CS:2 * CS])[0] == 200
+assert call("GET", f"/ingest/{N}/{uid}/status")[1]["stored"] == [0, 1, 2]
+code, out = call("POST", f"/ingest/{N}/{uid}/complete")
+assert code == 200 and out["ok"], out
+assert (sess / "ingest" / "clip.bin").read_bytes() == src
+print("  ok   init/chunk/status/complete round trip on the running server")
+PYI
+check $? "ingest round trip on the live server"
+"$PY" -m pytest -q "$SKILL/tests/test_ingest.py" > "$WORK/ingest-pytest.log" 2>&1
+check "$?" "chunked ingest pytest suite"
+tail -1 "$WORK/ingest-pytest.log" | grep -q "passed" \
+  && echo "  ok   pytest suite reported passed" \
+  || { echo "  FAIL pytest suite did not report passed"; fails=$((fails+1)); }
 kill $WPID 2>/dev/null
 
 echo
