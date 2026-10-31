@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The one entry point. Uses the pinned venv so the tool never depends on which
+# python3 happens to be first on PATH today.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="$HERE/.venv/bin/python"
+[ -x "$PY" ] || { echo "no .venv - run ./setup.sh first" >&2; exit 1; }
+exec "$PY" "$HERE/tool/scripts/adrd.py" "$@"

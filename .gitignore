@@ -1,0 +1,31 @@
+.venv/
+# Do not commit client-identifying or credential material.
+# This repo holds recordings of a live client app before masking.
+
+sessions/*/recording.mp4
+sessions/*/raw/
+sessions/*/export/video/recording_UNMASKED.mp4
+sessions/*/export.zip
+sessions/*/stills/
+sessions/*/stills_annotated/
+sessions/*/render/proof_crops/
+sessions/*/render/proof_frames/
+sessions/*/render/sweep_frames/
+sessions/*/render/debrand_proof.png
+sessions/*/render/screens_contact_sheet.png
+sessions/*/render/sweep.png
+sessions/*/walk.json
+sessions/*/dashboard.log
+sessions/*/tunnel.json
+sessions/*/tunnel.log
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# --- added 2026-10-31 before initialising the repo ---
+# Blanket rule: the granular patterns above do NOT cover sessions/*/export/evidences/,
+# which mirrors unmasked client screens (logo, product name, real user names).
+# Verified: `git add -A` would have staged 546 such files, 42 MB.
+sessions/
+*.fig

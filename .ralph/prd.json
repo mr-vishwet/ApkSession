@@ -1,0 +1,189 @@
+{
+  "project": "ApkSession",
+  "branchName": "ralph/apksession-device-ingest",
+  "description": "Device ingest leg for ApkSession: pull real 4K/HEVC clips off an Android device and transfer them resumably, surviving app kill, process kill, network drop and server restart, reusing the existing session-folder contract, dashboard and token gate. Deliverable includes a measured INGEST_NOTES.md, not just working code.",
+  "qualityGates": {
+    "python": "./tool/tests/run.sh must print PASS (last line), using the pinned .venv via ./adrd or .venv/bin/python",
+    "kotlin": "./gradlew lint test assembleDebug must pass from ingest/android",
+    "ui": "Seen running on the demo35 AVD with a screenshot saved under the session's ingest/ folder - a green build is not proof"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Scaffold the ingest Android module so it builds and installs",
+      "description": "As a developer, I need a Kotlin + Compose module that compiles and runs on the emulator, so that later stories add behaviour instead of bootstrapping a project inside one iteration.",
+      "acceptanceCriteria": [
+        "Create ingest/android/ as a Gradle project: Kotlin, Jetpack Compose + Material 3, minSdk 26, targetSdk 35",
+        "Single empty Compose activity that renders the app name and a placeholder text line",
+        "./gradlew assembleDebug produces an APK",
+        "APK installs and launches on the demo35 AVD; capture a screenshot to ingest/android/proof/US-001.png",
+        "Add ingest/android/.gitignore covering build/, .gradle/, local.properties, *.apk so no artifact is committed",
+        "Do not modify any file under tool/scripts/adrd/ - this story is additive only",
+        "./gradlew lint test passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Add chunked upload endpoints to the existing dashboard server",
+      "description": "As the pipeline, I need an endpoint that accepts numbered chunks and assembles them, so that a transfer can stop and start without losing work.",
+      "acceptanceCriteria": [
+        "POST /ingest/<session>/init accepts {filename, size, sha256, chunk_size} and returns upload_id; calling init again for the same file returns the existing upload_id (idempotent)",
+        "PUT /ingest/<session>/<upload_id>/chunk/<n> stores one chunk; re-sending an already-stored chunk returns 200, not 4xx",
+        "GET /ingest/<session>/<upload_id>/status returns the set of stored chunk indices",
+        "POST /ingest/<session>/<upload_id>/complete assembles in index order and returns 409 naming the missing ranges when any index is absent",
+        "complete verifies SHA-256 of the assembled file against the init value and fails loudly on mismatch",
+        "Reject any filename containing a path separator or '..' - assert 403 in a test, matching the existing path-traversal test style in tool/tests/run.sh",
+        "All chunk and assembled files are written only inside the session folder, under ingest/",
+        "Every new route requires the existing access token; the index page must not leak session names without it, as already enforced elsewhere",
+        "Add the new endpoint tests to tool/tests/run.sh so they run with no device attached",
+        "./tool/tests/run.sh prints PASS"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Chunk reader with bounded memory and an atomic checkpoint",
+      "description": "As the uploader, I need to read a bounded slice of a large file and remember where I got to, so that resume is a lookup rather than a re-scan.",
+      "acceptanceCriteria": [
+        "Reads chunk n via random access (seek + fixed-size read), not by scanning from the start",
+        "Peak heap stays under 16 MB while reading a 2 GB sparse file at 4 MB chunk size; assert with a test that measures, not one that assumes",
+        "Checkpoint record holds upload_id, chunk_size, next_index, source_size, source_sha256, source_generation_id",
+        "Checkpoint is written only AFTER the server acks that chunk; a test asserts a crash between read and ack replays that chunk rather than skipping it",
+        "Checkpoint write is atomic (temp file + rename)",
+        "Unit tests run on the host JVM with no device attached",
+        "./gradlew lint test passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Pick real device videos and read their metadata",
+      "description": "As a user, I want to pick clips from the device so I am testing against actual camera files rather than fixtures I generated myself.",
+      "acceptanceCriteria": [
+        "Photo picker used on Android 13+; READ_MEDIA_VIDEO requested, no all-files permission",
+        "Resolved from a content:// URI, not only a real path - a test exercises a content URI",
+        "Displays codec, width x height, bitrate and byte size from MediaMetadataRetriever before any transfer starts",
+        "A 4K HEVC clip is visibly identifiable in the list (codec + resolution shown together)",
+        "Selecting a file produces a source_generation_id that changes if the underlying file changes",
+        "Verify on the demo35 AVD with a screenshot to ingest/android/proof/US-004.png showing a real clip's metadata",
+        "./gradlew lint test passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Happy-path transfer wired end to end over loopback",
+      "description": "As a developer, I want the picker, reader, checkpoint and server endpoints connected so that one clip moves successfully before I harden any failure mode.",
+      "acceptanceCriteria": [
+        "Selecting a clip and pressing Upload transfers it to the running dashboard server on 127.0.0.1:8734",
+        "Transfer uses the US-003 checkpoint and the US-002 endpoints; no parallel reimplementation of either",
+        "Assembled file on the server is byte-identical to the source (SHA-256 match reported by the client)",
+        "A scripted end-to-end run completes for a 200 MB file and for a 0-byte file",
+        "Nothing outside the session folder is written",
+        "./tool/tests/run.sh prints PASS",
+        "./gradlew lint test passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Run the transfer through WorkManager so it survives leaving the app",
+      "description": "As a user, I want the upload to keep going when I leave the app, because a multi-gigabyte clip is never foreground time.",
+      "acceptanceCriteria": [
+        "Transfer driven by WorkManager with a networkType constraint; one worker per chunk-batch so retry granularity is a batch, not the whole job",
+        "am force-stop mid-upload then relaunch: resumes from the last acked chunk and completes; proven by a scripted test, not a manual observation",
+        "Device reboot mid-upload: transfer resumes; if WorkManager does not restore the enqueue, the app re-enqueues from the persisted checkpoint on start and a test proves that path",
+        "Foreground service used only if genuinely required; if used, correct foregroundServiceType and Android 14 permission handling, and state in the commit message whether it was needed",
+        "No polling loop faster than 1 s; worker finishes and leaves no resident notification",
+        "Verify the resume-after-force-stop on demo35 and save proof to ingest/android/proof/US-006.png",
+        "./gradlew lint test passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Backoff and recovery on a link that drops",
+      "description": "As a user on bad network, I want the transfer to back off and recover rather than restart or silently stall.",
+      "acceptanceCriteria": [
+        "Exponential backoff with jitter, capped, and a bounded attempt budget that surfaces a terminal failed state instead of retrying forever",
+        "Airplane mode toggled mid-upload on the AVD: pauses, then on restore resumes from the last acked chunk with zero duplicate assembled bytes",
+        "Server killed and restarted mid-upload: client recovers via the status endpoint rather than assuming",
+        "HTTP 5xx and connection-reset paths each covered by a test against a local fault-injecting stub",
+        "A response meaning 'already have this chunk' is treated as success, not error",
+        "Terminal failure leaves the checkpoint intact so a later attempt continues",
+        "Do not introduce a reconnect loop without backoff - NOTES.md already flags that as an existing defect elsewhere in the portfolio",
+        "./tool/tests/run.sh prints PASS",
+        "./gradlew lint test passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Progress UI derived from server acknowledgements",
+      "description": "As a reviewer, I want to see what has actually been acknowledged so far, so that the progress bar means something.",
+      "acceptanceCriteria": [
+        "Progress computed from server-acked chunk count, never from bytes handed to the socket",
+        "Shows MB transferred, MB total, current throughput and a rolling ETA",
+        "Throughput is a moving average over the last N acks; a test feeds a synthetic ack sequence and asserts the displayed value",
+        "After a resume, progress starts at the correct value rather than jumping to 0%",
+        "0-byte and single-chunk files produce no division-by-zero and no NaN ETA",
+        "Verify on the demo35 AVD with a real clip and save a screenshot of a mid-transfer state to ingest/android/proof/US-008.png",
+        "./gradlew lint test passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Integrity verification and playback through the dashboard",
+      "description": "As the pipeline, I need to know the file on the server is the file that was on the phone, and that it still plays.",
+      "acceptanceCriteria": [
+        "Client computes the source SHA-256 as a streaming digest without loading the file whole",
+        "Report the measured cost of that digest, including whether it forces a second full read of the file",
+        "A corrupted-chunk test (flip one byte before sending) is detected at complete and is not silently assembled; chunks are kept for diagnosis",
+        "Assembled file is registered so the existing dashboard can serve it and it plays back",
+        "Ingest artifacts are served on their own path and are NOT routed through the masked/unmasked de-branding video path",
+        "Existing proof and sweep stages behave unchanged",
+        "./tool/tests/run.sh prints PASS"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Write INGEST_NOTES.md with measured findings",
+      "description": "As the author, I want the numbers this leg produced written down, including the ones that surprised me, because that is the part that is hard to fake.",
+      "acceptanceCriteria": [
+        "INGEST_NOTES.md at the ApkSession root, same voice and evidence discipline as NOTES.md",
+        "Reports measured throughput by chunk size for at least 1, 4 and 8 MB over the tunnel",
+        "Reports resume cost as a function of file size, and real time to move a 1 GB clip over the quick tunnel versus plain loopback",
+        "Documents how the quick tunnel behaves under a long sustained PUT, including whether it drops, and what the client did about it",
+        "Contains at least one finding that contradicts an assumption held before the run, stated as such; if nothing was contradicted, say so and say what was expected",
+        "If adaptive chunk sizing is implemented, the rule driving it is written down with its measured benefit; if not implemented, state that rather than implying it",
+        "Explicitly lists what was NOT tested (iOS, real cellular network, HEVC-specific handling)",
+        "Every number in the document is reproducible from a command recorded in the document",
+        "./tool/tests/run.sh prints PASS"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

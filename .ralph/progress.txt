@@ -1,0 +1,37 @@
+# Ralph progress — ApkSession device ingest
+
+Branch: ralph/apksession-device-ingest
+PRD: .ralph/prd.json
+Spec: tasks/prd-apksession-device-ingest.md
+
+## Codebase Patterns
+
+- Entry point is `./adrd` (bash wrapper) which execs the pinned `.venv/bin/python` on
+  `tool/scripts/adrd.py`. Never call a bare `python3` for tool work.
+- Quality gate is `./tool/tests/run.sh`; its final line is `PASS  artifacts in <dir>` or
+  `FAIL  <n> stage(s)`. Every story must leave that green.
+- `run.sh` has a `check()`/`expect()` helper style and already tests path traversal (403) and
+  byte-range seeking (206) against the live dashboard. New endpoint tests should follow that shape.
+- The dashboard binds `127.0.0.1:8734` and is gated by an access token; `--public` puts it behind a
+  Cloudflare quick tunnel. `trycloudflare` mints a random hostname per process, so never assume the
+  URL survives a restart.
+- Session folders are the only store. Anything a stage produces lives inside `sessions/<id>/`.
+- Media inspection: reuse `tool/scripts/adrd/ff.py::probe()`. It branches on
+  `env.find_ffprobe()`, which returns None on the pip static build (imageio-ffmpeg ships ffmpeg
+  but no ffprobe) and falls back to parsing `ffmpeg -i` stderr. Do not assume ffprobe exists.
+- Android metadata comes from `MediaMetadataRetriever` on-device, not from the host.
+- Known traps from NOTES.md: `%` inside embedded dashboard HTML breaks `%`-formatting (use
+  placeholders); never `SIGKILL` a device-side process (corrupts in-flight files); `am force-stop`
+  does not log an app out, use `pm clear` for a genuine cold start.
+- Emulator: AVD `demo35`, 1080x2400, boots in ~40 s and needs host GPU enabled. Host is M1 Air,
+  8 GB RAM, no CUDA, disk near full — do not install a large toolchain to solve anything.
+- `.gitignore` deliberately keeps unmasked client material out of version control. Never widen it to
+  make a commit easier, and never `git add -f` a session artifact.
+- Proof screenshots must use generic or stock media only. Never drive the ingest app against a client
+  app's screens or a client's real clips - `sessions/*/export/evidences/box-placement/*.png` shows why:
+  those stills carry the client logo, product name and real user names, and they are NOT ignored by
+  the current `.gitignore`.
+
+## Log
+
+_Append entries below. Never rewrite this file._
