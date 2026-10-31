@@ -59,8 +59,8 @@
         "./gradlew lint test passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-10-31 on the host JVM. ingest/android new files: ChunkReader.kt (RandomAccessFile seek + one bounded read, buffer allocated at exactly chunkSize, default 4 MiB companion), Checkpoint.kt (record holds upload_id, chunk_size, next_index, source_size, source_sha256, source_generation_id; save = temp write + flush + fd.sync + rename; load only ever sees complete records, malformed target throws), ChunkPump.kt (checkpoint advanced ONLY after ack returns true; failed ack or thrown exception leaves nextIndex on the un-acked chunk so resume replays it). 8 JUnit tests in app/src/test/.../ChunkReaderTest.kt: 64 MiB + 5000 B sequential concat digest equals source, resume from checkpoint acks exactly chunks 3..10 with remainder digest match, crash-between-read-and-ack replays the chunk (asserted nextIndex=2 after throw, first resumed ack is index 2), failed ack stops without advancing, torn temp never observed after crashed writer (last completed record reloads intact), buffer length == chunkSize, and a measured 2 GiB sparse-file test asserting heap growth stays under 16 MB. `./gradlew lint test` BUILD SUCCESSFUL; testDebugUnitTest reports tests=8 failures=0."
     },
     {
       "id": "US-004",

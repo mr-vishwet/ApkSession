@@ -85,3 +85,27 @@ _Append entries below. Never rewrite this file._
   waiting for bytes it was told would arrive.
 ---
 
+## [2026-10-31 23:44] - US-003
+- Kotlin, ingest/android, three new main sources + one test class (all pure JVM, no Robolectric):
+  ChunkReader.kt (RandomAccessFile seek + single bounded read; buffer allocated at exactly chunkSize,
+  DEFAULT_CHUNK_SIZE = 4 MiB; only the final short chunk is trimmed),
+  Checkpoint.kt (upload_id, chunk_size, next_index, source_size, source_sha256, source_generation_id;
+  save = temp write, flush, fd.sync, rename; load reads only the target, so a torn temp can never be
+  observed; malformed target throws instead of guessing),
+  ChunkPump.kt (advances the checkpoint ONLY after the ack callback returns true; false or a thrown
+  exception leaves nextIndex on the un-acked chunk, so resume replays that exact chunk).
+- Commands run: `./gradlew :app:testDebugUnitTest` -> BUILD SUCCESSFUL,
+  ChunkReaderTest tests=8 failures=0 errors=0 (1.2s), PlaceholderTest tests=1;
+  `./gradlew lint test` -> BUILD SUCCESSFUL in 39s.
+- What the 8 tests measure: 64 MiB + 5000 B file read in 4 MiB chunks, concatenated digests equal the
+  file digest; resume from next_index=3 acks exactly 3..10 and the remainder digest matches the source
+  tail; crash-between-read-and-ack leaves next_index=2 and the replayed ack starts at 2; a failed ack
+  stops without advancing; an abandoned half-written temp leaves the last completed checkpoint exactly
+  intact; buffer length asserted == chunkSize; and a REAL heap measurement on a 2 GiB sparse file
+  (Runtime used-memory after gc, only one chunk held) asserted under 16 MB - it passed, not assumed.
+- Device-only remainder unchanged: US-001 runtime screenshot, US-004 picker on demo35, US-005..US-008
+  end-to-end/WorkManager/UI proof all still need a device or emulator this host does not have.
+- Not done tonight (deliberately out of US-002/US-003 scope): the client half that talks to the new
+  routes (US-005), sha256 of the source on the client (US-009), dashboard registration of assembled
+  files, and INGEST_NOTES.md numbers (US-010).
+---
