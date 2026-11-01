@@ -75,25 +75,45 @@ def _run_stages(root: Path, name: str, apk: Path, raw: bool = False) -> None:
         ("export", [py, adrd, "export", "--session", str(root),
                     "--yes" if raw else "--no-raw"]),
     ]
+    started = time.strftime("%Y-%m-%d %H:%M:%S")
+    hist = [{"name": n, "state": "waiting", "seconds": None} for n, _ in stages]
+    rec = root / "inputs" / "run.json"
+
+    def note(name: str, state: str, seconds: float | None = None) -> None:
+        """The page shows the whole pipeline, not just the current line of the log, so a
+        viewer can see how far the run got when a stage dies on a device limit."""
+        for h in hist:
+            if h["name"] == name:
+                h.update(state=state,
+                         seconds=seconds if seconds is not None else h["seconds"])
+        rec.write_text(json.dumps({"started": started, "raw": raw, "stages": hist,
+                                   "at": round(time.time(), 2)}))
+
     for stage, cmd in stages:
+        note(stage, "running")
         write_status(root, stage=stage)
         with log.open("a", encoding="utf-8") as lf:
             lf.write(f"== {stage} ==\n")
             lf.flush()
+        t0 = time.time()
         try:
             cp = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
         except Exception as exc:
             with log.open("a", encoding="utf-8") as lf:
                 lf.write(f"{stage} raised: {exc}\n")
             write_status(root, stage=f"{stage}: error")
+            note(stage, "failed", round(time.time() - t0, 1))
             return
         with log.open("a", encoding="utf-8") as lf:
             lf.write(cp.stdout)
             lf.write(cp.stderr)
             lf.write(f"exit={cp.returncode}\n")
+        secs = round(time.time() - t0, 1)
         if cp.returncode != 0:
             write_status(root, stage=f"{stage}: failed (exit {cp.returncode})")
+            note(stage, "failed", secs)
             return
+        note(stage, "ok", secs)
     write_status(root, stage="done")
 
 
@@ -187,6 +207,11 @@ def session_view(root: Path) -> dict:
                       "frac": [frac.get("x", 0), frac.get("y", 0),
                                frac.get("w", 0), frac.get("h", 0)]})
     arts = []
+    run = read_json(s.root / "inputs" / "run.json", {})
+    if run.get("stages") and not RUNS.get(s.root.name, {}).get("alive"):
+        for h in run["stages"]:  # a stage left "running" means the runner died mid-stage
+            if h["state"] == "running":
+                h["state"] = "interrupted"
     for key, what in ARTIFACTS:
         p = s.path(key)
         if p.exists():
@@ -205,7 +230,7 @@ def session_view(root: Path) -> dict:
             "recorded" if tl else "calibrating"),
         "step": status, "duration": dur, "offset": tl.get("offset"),
         "align": tl.get("align", {}), "chapters": tl.get("chapters", []),
-        "boxes": boxes, "screens": tl.get("screens", {}),
+        "boxes": boxes, "screens": tl.get("screens", {}), "run": run,
         "artifacts": arts, "progress": prog, "percent": pct,
         "proof": (rend.get("proof") or {}).get("tally", {}),
         "video_ready": bool((rend.get("video") or "")) and Path(rend.get("video", "")).exists(),
@@ -322,9 +347,15 @@ async function tick(){let j;
  document.getElementById('dev').textContent=j.device?`${j.device} ${j.size?j.size.join('x'):''}`:'no device';
  const st=document.getElementById('stage');st.textContent=j.stage;st.className='pill '+(j.stage.includes('shar')?'ok':'warn');
  const s=j.step||{};
- document.getElementById('step').innerHTML=s.i!==undefined
+ const rs=(j.run&&j.run.stages)||[];
+ const pill=h=>`<span class="pill ${h.state==='ok'?'ok':h.state==='running'?'warn'
+  :(h.state==='failed'||h.state==='interrupted')?'bad':''}">${h.name}${h.seconds?' '+h.seconds+'s':''}</span>`;
+ document.getElementById('step').innerHTML=(rs.length
+  ?rs.map(pill).join(' ')+`<div class=n>run ${ht(j.run.started||'')}${j.run.raw
+    ?' - this export carries the unmasked capture':''}</div>`:'')+
+  (s.i!==undefined
   ?`<b>${(s.chapter||'-')}</b><br><span style=color:var(--mut)>step ${s.i} · ${s.label||''}</span>`
-  :'<pre>idle - nothing running right now</pre>';
+  :(rs.length?'':'<pre>idle - nothing running right now</pre>'));
  document.getElementById('pb').style.width=(j.percent||0)+'%';
  document.getElementById('pct').textContent=j.percent!=null?`render ${j.percent}%`:'';
  const cur=s.i!==undefined?j.chapters.findIndex(c=>s.chapter&&c.module===s.chapter):-1;

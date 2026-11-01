@@ -366,6 +366,49 @@ def test_a_box_drawn_on_the_page_can_be_removed_from_the_page(server):
         assert code == 400, (bad, out)
 
 
+def test_the_run_records_every_stage_so_the_page_can_show_the_pipeline(tmp_path, monkeypatch):
+    """Someone watching the demo needs to see launch -> take -> brand -> render -> doc
+    -> export move along, not scroll a log. A stage that fails must stay visible as the
+    reason the run stopped, with the stages after it still waiting."""
+    root = tmp_path / "sessions" / "beta"
+    (root / "inputs").mkdir(parents=True)
+    (root / "state.json").write_text(json.dumps({"app": "beta", "package": "com.x.app"}))
+    apk = root / "inputs" / "app.apk"
+    apk.write_bytes(APK)
+    def fake(cmd, **kw):
+        stage = cmd[2]                      # [python, adrd.py, <stage>, --session, ...]
+        code = 1 if stage == "sweep" else 0
+        return type("R", (), {"returncode": code, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(watch.subprocess, "run", fake)
+    watch._run_stages(root, "beta", apk)
+
+    run = json.loads((root / "inputs" / "run.json").read_text())
+    names = [h["name"] for h in run["stages"]]
+    assert names == ["launch", "take", "brand", "render", "sweep", "doc", "export"], names
+    states = {h["name"]: h["state"] for h in run["stages"]}
+    assert states["launch"] == "ok" and states["render"] == "ok"
+    assert states["sweep"] == "failed", states
+    assert states["doc"] == "waiting" and states["export"] == "waiting"
+    assert run["raw"] is False and run["started"]
+
+    view = watch.session_view(root)
+    assert [h["state"] for h in view["run"]["stages"]] == list(states.values())
+
+
+def test_a_stage_left_running_by_a_dead_runner_is_called_interrupted(tmp_path):
+    root = tmp_path / "sessions" / "gamma"
+    (root / "inputs").mkdir(parents=True)
+    (root / "state.json").write_text(json.dumps({"app": "gamma"}))
+    (root / "inputs" / "run.json").write_text(json.dumps(
+        {"started": "x", "raw": False,
+         "stages": [{"name": "take", "state": "running", "seconds": None},
+                    {"name": "render", "state": "waiting", "seconds": None}]}))
+    stages = watch.session_view(root)["run"]["stages"]
+    assert stages[0]["state"] == "interrupted"
+    assert stages[1]["state"] == "waiting"
+
+
 def test_a_box_can_be_moved_onto_another_screens_time_window(server):
     """Every leak that survived a sweep last round was a box drawn on the right pixels
     but filed under a screen whose window did not cover the seconds it needed. The page
