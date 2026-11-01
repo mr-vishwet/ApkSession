@@ -657,6 +657,22 @@ def test_a_stage_left_running_by_a_dead_runner_is_called_interrupted(tmp_path):
     assert stages[1]["state"] == "waiting"
 
 
+def test_the_picker_still_knows_the_frame_when_the_timeline_does_not(server):
+    """Every box is measured against a frame size. Sessions taken before the timeline
+    carried one reported size [], so a drag sent a 0x0 box and the server had no frame
+    to judge anything against - the picker looked alive and could not place a mask."""
+    port, alpha = server
+    (alpha / "state.json").write_text(json.dumps({"package": "com.example.app",
+                                                 "screen_size": [1080, 2400]}))
+    (alpha / "timeline.json").write_text(json.dumps({"events": [], "chapters": []}))
+    code, out = req(port, "GET", f"/s/alpha/api/picklist?t={TOKEN}")
+    assert code == 200 and out["size"] == [1080, 2400], out
+
+    code, out = req(port, "POST",
+                    f"/s/alpha/api/box?t={TOKEN}&screen=home&x=900&y=100&w=500&h=500&mode=solid")
+    assert code == 400 and "1080x2400" in str(out["error"]), out
+
+
 def test_a_box_can_be_moved_onto_another_screens_time_window(server):
     """Every leak that survived a sweep last round was a box drawn on the right pixels
     but filed under a screen whose window did not cover the seconds it needed. The page
@@ -687,6 +703,20 @@ def test_a_box_can_be_moved_onto_another_screens_time_window(server):
     for bad in ("screen=../../etc", "screen=", "i=9&screen=home", "i=x&screen=home"):
         code, out = req(port, "POST", f"/s/alpha/api/box?t={TOKEN}&op=set&{bad}")
         assert code == 400, (bad, out)
+
+    # the same call can move a near-miss box instead of deleting and redrawing it
+    scope_before = json.loads((alpha / "branding.json").read_text())["entries"][0]["scope"]
+    code, out = req(port, "POST",
+                    f"/s/alpha/api/box?t={TOKEN}&op=set&i=0&x=300&y=200&w=520&h=110")
+    assert code == 200 and out["rect"] == [300, 200, 520, 110], out
+    entries = json.loads((alpha / "branding.json").read_text())["entries"]
+    assert entries[0]["rect"] == {"x": 300, "y": 200, "w": 520, "h": 110}
+    assert abs(entries[0]["frac"]["x"] - 300 / 1080) < 1e-9, entries[0]["frac"]
+    assert entries[0]["scope"] == scope_before, "a move must not change the scope"
+
+    code, out = req(port, "POST",
+                    f"/s/alpha/api/box?t={TOKEN}&op=set&i=0&x=1000&y=100&w=520&h=110")
+    assert code == 400, out
 
 
 def test_a_preset_repeated_does_not_stack_boxes():

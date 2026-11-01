@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import ff
 from . import ingest as IN
 from . import uploads as UP
 from .env import cf_cert, cf_dir
@@ -441,7 +442,17 @@ function ht(s){return String(s==null?'':s).split('').map(c=>({'&':'&amp;','<':'&
 function pkOld(){const o=document.getElementById('pkOld');if(!o)return;
  const s=PKS.stills[+(document.getElementById('pkSel').value||0)];if(!s){o.innerHTML='';return}
  o.innerHTML=BOXES.filter(b=>b.scope==='screen:'+s.screen||b.scope==='global').map(b=>
-  `<div title="${ht(b.label)}" style="position:absolute;border:1px solid #5ac8fa;left:${b.frac[0]*100}%;top:${b.frac[1]*100}%;width:${b.frac[2]*100}%;height:${b.frac[3]*100}%"></div>`).join('')}
+  `<div data-i=${b.i} title="drag to move - ${ht(b.label)}" style="position:absolute;pointer-events:auto;cursor:move;border:1px solid #5ac8fa;left:${b.frac[0]*100}%;top:${b.frac[1]*100}%;width:${b.frac[2]*100}%;height:${b.frac[3]*100}%"></div>`).join('')}
+let pkMv=null;
+function pkMove(e){if(!pkMv)return true;const p=pkPos(e),W=PKS.size[0]||1,H=PKS.size[1]||1;
+ pkMv.x=Math.max(0,Math.min(W-pkMv.w,pkMv.sx+p[0]-pkMv.px));
+ pkMv.y=Math.max(0,Math.min(H-pkMv.h,pkMv.sy+p[1]-pkMv.py));
+ pkMv.d.style.left=(pkMv.x/W*100)+'%';pkMv.d.style.top=(pkMv.y/H*100)+'%';return false}
+async function pkDrop(){const m=pkMv;pkMv=null;if(!m)return;
+ try{const j=await post('/api/box',{op:'set',i:m.i,x:Math.round(m.x),y:Math.round(m.y),
+    w:Math.round(m.w),h:Math.round(m.h)});
+  note('box moved to '+j.rect[0]+','+j.rect[1],1);}catch(err){note('move failed: '+String(err).slice(0,120));}
+ tick();}
 function pkPos(ev){const im=document.getElementById('pkImg');const r=im.getBoundingClientRect();
  const W=PKS.size[0]||im.naturalWidth||1,H=PKS.size[1]||im.naturalHeight||1;
  return[Math.round((ev.clientX-r.left)/r.width*W),Math.round((ev.clientY-r.top)/r.height*H)];}
@@ -451,11 +462,17 @@ function pkDraw(){const b=document.getElementById('pkBox');
  b.style.left=(pkDrag.x/W*100)+'%';b.style.top=(pkDrag.y/H*100)+'%';
  b.style.width=(pkDrag.w/W*100)+'%';b.style.height=(pkDrag.h/H*100)+'%';}
 const pkW=document.getElementById('pkWrap');
-if(pkW){pkW.onpointerdown=e=>{e.preventDefault();const p=pkPos(e);pkDrag={ax:p[0],ay:p[1],x:p[0],y:p[1],w:0,h:0};pkW.setPointerCapture(e.pointerId)};
- pkW.onpointermove=e=>{if(!pkDrag)return;const p=pkPos(e);
+if(pkW){pkW.onpointerdown=e=>{const d=e.target.closest&&e.target.closest('[data-i]');
+  if(d){const b=BOXES.find(x=>String(x.i)===d.dataset.i);
+    if(!b)return;const p=pkPos(e),W=PKS.size[0]||1,H=PKS.size[1]||1;
+    pkMv={d,i:b.i,sx:b.frac[0]*W,sy:b.frac[1]*H,w:b.frac[2]*W,h:b.frac[3]*H,
+          px:p[0],py:p[1],x:b.frac[0]*W,y:b.frac[1]*H};return}
+  e.preventDefault();const p=pkPos(e);pkDrag={ax:p[0],ay:p[1],x:p[0],y:p[1],w:0,h:0};
+  pkW.setPointerCapture(e.pointerId)};
+ pkW.onpointermove=e=>{if(pkMv){pkMove(e);return}if(!pkDrag)return;const p=pkPos(e);
   pkDrag.x=Math.min(pkDrag.ax,p[0]);pkDrag.y=Math.min(pkDrag.ay,p[1]);
   pkDrag.w=Math.abs(p[0]-pkDrag.ax);pkDrag.h=Math.abs(p[1]-pkDrag.ay);pkDraw()};
- pkW.onpointerup=()=>pkDraw();}
+ pkW.onpointerup=()=>{if(pkMv){pkDrop();return}pkDraw()};}
 async function loadPick(){const el=document.getElementById('pkSel');if(!el)return;
  try{const j=await(await fetch(u('/api/picklist'))).json();PKS=j;
   el.innerHTML=j.stills.length?j.stills.map((s,i)=>`<option value="${i}">${s.still} - ${s.screen}</option>`).join(''):'<option>no stills captured yet</option>';
@@ -517,6 +534,33 @@ td:first-child{color:#8b94a3;white-space:nowrap}.n{color:#8b94a3;font-size:12px}
 __ROWS__</table>
 <p class=n>Serve is bound to __HOST__. Live frames are unmasked client app content - a non-loopback
 bind requires the token in the URL.</p>"""
+
+
+def _frame_size(root: Path) -> list[int]:
+    """The frame every mask box is measured against. timeline.json is the authority once
+    a take has written it; before that the device size or a still will do. Without any
+    size the picker cannot tell a box from a dot and cannot say what is out of frame."""
+    tl = read_json(root / "timeline.json", {}) or {}
+    if tl.get("size"):
+        return list(tl["size"])
+    st = read_json(root / "state.json", {}) or {}
+    if st.get("screen_size"):
+        return list(st["screen_size"])
+    for p in sorted((root / "stills").glob("*.png")):
+        try:
+            return list(ff.dims(p))
+        except Exception:
+            continue
+    return [0, 0]
+
+
+def _fits(size: list, x: int, y: int, w: int, h: int) -> str | None:
+    """A box has to be big enough to mask anything and inside the recorded frame; a drag
+    that leaves the frame would silently mask nothing and look like it worked."""
+    if w < 8 or h < 8 or x < 0 or y < 0 or (size[0] and x + w > size[0]) or \
+       (size[1] and y + h > size[1]):
+        return f"box {x},{y} {w}x{h} is not inside the {size[0]}x{size[1]} frame"
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -739,11 +783,10 @@ class Handler(BaseHTTPRequestHandler):
             x, y, w, h = (int(q[k][0]) for k in ("x", "y", "w", "h"))
         except (KeyError, ValueError):
             return self._json(400, {"error": "x, y, w and h are required integers"})
-        size = (read_json(root / "timeline.json", {}) or {}).get("size") or [0, 0]
-        if w < 8 or h < 8 or x < 0 or y < 0 or (size[0] and x + w > size[0]) or \
-           (size[1] and y + h > size[1]):
-            return self._json(400, {"error": f"box {x},{y} {w}x{h} is not inside the "
-                                             f"{size[0]}x{size[1]} frame"})
+        size = _frame_size(root)
+        bad = _fits(size, x, y, w, h)
+        if bad:
+            return self._json(400, {"error": bad})
         cmd = [sys.executable, _adrd_path(), "brand", "add", "--session", str(root),
                "--screen", screen, "--rect", f"{x},{y},{w},{h}", "--label", label,
                "--mode", mode]
@@ -787,19 +830,34 @@ class Handler(BaseHTTPRequestHandler):
                          "left": len(entries) - 1})
 
     def _box_set(self, root: Path, q: dict) -> None:
-        """Move a box onto another screen's time window, keeping its geometry. Every leak
-        that survived a sweep in the last round was a correct box filed under a screen
-        name whose window did not cover the seconds it needed to."""
+        """Move, resize or re-scope an existing box. Every leak that survived a sweep was
+        a correct box filed under a screen whose window did not cover the seconds it
+        needed, and the fix is a near-miss box - not a redraw of one."""
         screen = q.get("screen", [""])[0]
-        if not re.fullmatch(r"global|[A-Za-z0-9_:-]{1,64}", screen):
+        if screen and not re.fullmatch(r"global|[A-Za-z0-9_:-]{1,64}", screen):
             return self._json(400, {"error": "unknown screen name"})
+        args = ["--screen", screen] if screen else []
+        rect = None
+        if all(k in q for k in ("x", "y", "w", "h")):
+            try:
+                x, y, w, h = (int(q[k][0]) for k in ("x", "y", "w", "h"))
+            except ValueError:
+                return self._json(400, {"error": "x, y, w and h are required integers"})
+            size = _frame_size(root)
+            bad = _fits(size, x, y, w, h)
+            if bad:
+                return self._json(400, {"error": bad})
+            rect = [x, y, w, h]
+            args += ["--rect", ",".join(str(v) for v in rect)]
+        if not args:
+            return self._json(400, {"error": "nothing to change: pass screen or x,y,w,h"})
         i = self._box_index(root, q)
         if i is None:
             return
-        cp = self._brand(root, "set", "--index", str(i), "--screen", screen)
+        cp = self._brand(root, "set", "--index", str(i), *args)
         if cp.returncode != 0:
             return self._json(500, {"error": (cp.stdout + cp.stderr).strip()[-300:]})
-        self._json(200, {"ok": True, "i": i, "scope": screen})
+        self._json(200, {"ok": True, "i": i, "scope": screen, "rect": rect})
 
     def _picklist(self, root: Path) -> None:
         tl = read_json(root / "timeline.json", {}) or {}
@@ -810,7 +868,7 @@ class Handler(BaseHTTPRequestHandler):
                 seen.add(still)
                 out.append({"still": still, "screen": e.get("screen") or "",
                             "label": e.get("label") or ""})
-        self._send(200, json.dumps({"size": tl.get("size") or [], "stills": out}).encode(),
+        self._send(200, json.dumps({"size": _frame_size(root), "stills": out}).encode(),
                    "application/json")
 
     def _upload(self, root: Path, q: dict) -> None:

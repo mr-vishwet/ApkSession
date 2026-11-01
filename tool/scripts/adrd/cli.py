@@ -258,6 +258,7 @@ def cmd_take(a) -> int:
     fit.update(T.remap(events, scenes, fit["offset"], total))
     tl = T.build(events, fit["offset"], total)
     tl["video"] = str(recording)
+    tl["size"] = list(ff.dims(recording))
     tl["scene_cuts"] = scenes
     tl["align"] = fit
     s.write("timeline", tl)
@@ -317,6 +318,7 @@ def cmd_retimeline(a) -> int:
     fit.update(T.remap(ev["events"], scenes, fit["offset"], total))
     tl = T.build(ev["events"], fit["offset"], total)
     tl["video"] = str(s.path("recording"))
+    tl["size"] = list(ff.dims(s.path("recording")))
     tl["scene_cuts"] = scenes
     tl["align"] = fit
     s.write("timeline", tl)
@@ -364,18 +366,34 @@ def cmd_brand(a) -> int:
     if a.what == "set":
         # A box drawn on the right pixels but filed under the wrong screen name is
         # invisible for its whole window and blind for every other one; re-scoping it
-        # keeps the geometry that was already correct.
-        if len(a.index) != 1 or not a.screen:
-            print("brand set --index i --screen NAME|global", file=sys.stderr)
+        # keeps the geometry that was already correct. The reverse is true too, so
+        # either half can be changed on its own.
+        if len(a.index) != 1 or not (a.screen or a.rect or a.frac):
+            print("brand set --index i [--screen NAME|global] [--rect x,y,w,h]",
+                  file=sys.stderr)
             return 2
         i = int(a.index[0])
         if not 0 <= i < len(b["entries"]):
             print(f"no box {i} - {len(b['entries'])} in this session", file=sys.stderr)
             return 2
         e = b["entries"][i]
-        e["scope"] = "global" if a.screen == "global" else f"screen:{a.screen}"
+        if a.screen:
+            e["scope"] = "global" if a.screen == "global" else f"screen:{a.screen}"
+        if a.rect or a.frac:
+            size = (tuple(int(v) for v in a.size.split("x")) if a.size
+                    else tuple(e.get("ref_size") or _ref_size(s, None, None)))
+            if a.rect:
+                rect = ff.Rect.parse(a.rect).clamped(*size)
+            else:
+                x, y, w, h = (float(v) for v in a.frac.split(","))
+                rect = ff.Rect(int(x * size[0]), int(y * size[1]),
+                               int(w * size[0]), int(h * size[1])).clamped(*size)
+            e["rect"] = rect.as_dict()
+            e["ref_size"] = list(size)
+            e["frac"] = {"x": rect.x / size[0], "y": rect.y / size[1],
+                         "w": rect.w / size[0], "h": rect.h / size[1]}
         s.write("branding", b)
-        print(f"{e['label']} -> {e['scope']}")
+        print(f"{e['label']} -> {e['scope']} {[int(v) for v in e['rect'].values()]}")
         return 0
     if a.what == "add":
         if not (a.rect or a.frac):
