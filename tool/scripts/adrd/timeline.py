@@ -307,15 +307,15 @@ def remap(events: list[dict], scenes: list[float], offset: float,
     it for any pause length; everything between anchors is interpolated.
     """
     anchors = anchor_events(events)
-    if not anchors or not scenes:
-        return {"method": "host clock", "snapped": 0, "residual": -1.0,
-                "scale": scale, "note": "no scene cuts or no transition steps to anchor on"}
-    host = [a["t_raw"] for a in anchors]
-    scale = measured_scale(total, [e["t_raw"] for e in events])
     if not total:
         return {"method": "host clock", "snapped": 0, "residual": -1.0, "scale": 1.0,
                 "note": "remap called without the video duration - caller bug, not a "
                         "data problem. Refusing to guess a scale."}
+    scale = measured_scale(total, [e["t_raw"] for e in events])
+    if not anchors or not scenes:
+        return {"method": "host clock", "snapped": 0, "residual": -1.0,
+                "scale": scale, "note": "no scene cuts or no transition steps to anchor on"}
+    host = [a["t_raw"] for a in anchors]
     want = [(h - host[0]) * scale for h in host]
     gaps = sorted(want[i + 1] - want[i] for i in range(len(want) - 1)) or [2.0]
     giveup = max(1.0, gaps[len(gaps) // 2] * 0.9)

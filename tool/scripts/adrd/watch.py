@@ -13,7 +13,6 @@ import shutil
 import socketserver
 import subprocess
 import sys
-import subprocess
 import threading
 import time
 import webbrowser
@@ -22,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import ingest as IN
+from . import uploads as UP
 from .session import Session
 
 BOUNDARY = "adrdframe"
@@ -30,6 +30,66 @@ ARTIFACTS = [("final", "shareable video"), ("vtt", "chapters"), ("doc", "session
              ("recording", "raw capture (unmasked)"), ("sheet", "screen sheet"),
              ("proof", "region proof"), ("bundle", "final export bundle")]
 LIVE_TTL = 45.0  # a status file this old means nothing is running
+
+RUN_LOCK = threading.Lock()
+RUNS: dict[str, dict] = {}
+
+_ADRD_PATH: str | None = None
+
+
+def _adrd_path() -> str:
+    global _ADRD_PATH
+    if _ADRD_PATH is None:
+        _ADRD_PATH = str(Path(__file__).resolve().parent.parent / "adrd.py")
+    return _ADRD_PATH
+
+
+def _run_guarded(root: Path, name: str, apk: Path) -> None:
+    """Whatever happens to the stages, the session must stop being marked as running -
+    otherwise one failed launch locks that session out of every later run."""
+    try:
+        _run_stages(root, name, apk)
+    finally:
+        with RUN_LOCK:
+            RUNS.pop(name, None)
+
+
+def _run_stages(root: Path, name: str, apk: Path) -> None:
+    """Run launch -> take -> render -> sweep -> doc -> export, one stage at a
+    time, writing each stage to status.json and appending output to
+    inputs/run.log so the dashboard can show progress."""
+    log = root / "inputs" / "run.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    py = sys.executable
+    adrd = _adrd_path()
+    stages = [
+        ("launch", [py, adrd, "launch", "--session", str(root), "--apk", str(apk), "--clear"]),
+        ("take", [py, adrd, "take", "--session", str(root)]),
+        ("render", [py, adrd, "render", "--session", str(root), "--step-captions"]),
+        ("sweep", [py, adrd, "sweep", "--session", str(root)]),
+        ("doc", [py, adrd, "doc", "--session", str(root)]),
+        ("export", [py, adrd, "export", "--session", str(root), "--yes"]),
+    ]
+    for stage, cmd in stages:
+        write_status(root, stage=stage)
+        with log.open("a", encoding="utf-8") as lf:
+            lf.write(f"== {stage} ==\n")
+            lf.flush()
+        try:
+            cp = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        except Exception as exc:
+            with log.open("a", encoding="utf-8") as lf:
+                lf.write(f"{stage} raised: {exc}\n")
+            write_status(root, stage=f"{stage}: error")
+            return
+        with log.open("a", encoding="utf-8") as lf:
+            lf.write(cp.stdout)
+            lf.write(cp.stderr)
+            lf.write(f"exit={cp.returncode}\n")
+        if cp.returncode != 0:
+            write_status(root, stage=f"{stage}: failed (exit {cp.returncode})")
+            return
+    write_status(root, stage="done")
 
 
 class Frames:
@@ -196,6 +256,12 @@ video{width:100%;max-height:52vh;background:#000;border-radius:8px}
 <div class=stage><h2>Live device</h2><div class=view id=v><img id=live alt=preview></div>
 <div id=err></div></div>
 <div class=stage><h2>Stage</h2><div id=step></div><div class=bar><i id=pb style=width:0></i></div><div id=pct></div></div>
+<div class=stage><h2>Inputs</h2><div id=inputs></div>
+<div class=row><input type=file id=fApk accept=".apk"><button id=bApk>Upload APK</button></div>
+<div class=row><input type=file id=fBrief accept=".md,.markdown,.txt,.pdf"><button id=bBrief>Upload brief</button></div>
+<div class=row><button id=bCases>Build test cases</button><button id=bRun>Start run</button></div>
+<div id=inote></div><pre id=ilog style="max-height:190px;overflow:auto;font-size:11px;margin:8px 0 0"></pre>
+</div>
 <div class=stage><h2>Rendered video</h2>
 <div class=row><label><input type=radio name=v checked id=vMask> masked</label>
 <label><input type=radio name=v id=vRaw> unmasked</label></div>
@@ -270,8 +336,25 @@ async function tick(){let j;
  err.innerHTML=live.dataset.err?`<pre>${live.dataset.err}</pre>`:''}
 document.getElementById('vMask').onchange=tick;
 document.getElementById('vRaw').onchange=tick;
+loadInputs();
 function ff(s){s=Math.max(0,s||0);return String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0')}
 function kb(n){return n>1e6?(n/1e6).toFixed(1)+' MB':Math.round(n/1024)+' KB'}
+function note(m,ok){const e=document.getElementById('inote');if(e)e.innerHTML=m?`<span class="pill ${ok?'ok':'bad'}">${m}</span>`:''}
+const ba=document.getElementById('bApk');if(ba)ba.onclick=()=>uploadFile('apk','fApk');
+const bb=document.getElementById('bBrief');if(bb)bb.onclick=()=>uploadFile('brief','fBrief');
+const bc=document.getElementById('bCases');
+if(bc)bc.onclick=()=>{bc.disabled=1;note('building cases...');post('/api/cases')
+ .then(j=>{note(j.count+' case(s) from the '+j.origin,1);loadInputs();})
+ .catch(e=>note('cases failed: '+String(e).slice(0,120)))
+ .finally(()=>{bc.disabled=0;});};
+const br=document.getElementById('bRun');
+if(br)br.onclick=()=>{br.disabled=1;note('run queued...');post('/api/run')
+ .then(j=>{note(j&&j.ok?'run started - launch, take, render, sweep, doc, export':'queued: '+(j&&j.error||''),j&&j.ok);loadInputs();})
+ .catch(e=>note('run failed: '+String(e).slice(0,140)))
+ .finally(()=>{loadInputs();});};
+async function post(p){const r=await fetch(u(p),{method:'POST'});return r.ok?await r.json():Promise.reject((await r.json().catch(()=>({}))).error||('http '+r.status));}
+async function uploadFile(kind,inputId){const el=document.getElementById(inputId);const file=el.files[0];if(!file)return note('pick a '+kind+' file first');const btn=document.getElementById('b'+(kind==='apk'?'Apk':'Brief'));btn.disabled=1;btn.textContent='uploading...';note('sending '+kb(file.size));try{const r=await fetch(u('/api/upload',{kind,name:file.name}),{method:'POST',body:file});const j=await r.json();if(!r.ok)throw new Error(j.error||('http '+r.status));note(kind+' uploaded: '+j.name+' '+kb(j.bytes),1);el.value='';loadInputs();}catch(e){note('upload rejected: '+e.message);}finally{btn.disabled=0;btn.textContent=kind==='apk'?'Upload APK':'Upload brief';}}
+async function loadInputs(){const el=document.getElementById('inputs');if(!el)return;try{const j=await(await fetch(u('/api/inputs'))).json();el.innerHTML='<table><tr><td>APK</td><td>'+(j.apk?j.apk.name+' ('+kb(j.apk.bytes)+')':'none')+'</td></tr><tr><td>Brief</td><td>'+(j.brief?j.brief.name+' ('+kb(j.brief.bytes)+')':'none')+'</td></tr><tr><td>Cases</td><td>'+(j.cases?j.cases.count+' from '+j.cases.origin:'none')+' &nbsp;<a href="'+u('/f/CASES.md')+'">open</a></td></tr><tr><td>Running</td><td>'+(j.running?'yes':'no')+'</td></tr></table>';const lg=document.getElementById('ilog');if(lg)lg.textContent=j.log||'';const rb=document.getElementById('bRun');if(rb)rb.disabled=!!j.running;}catch(e){el.innerHTML='<pre>inputs fetch failed: '+e+'</pre>';}}
 tick();setInterval(tick,1500);setInterval(draw,900);
 </script>"""
 
@@ -400,6 +483,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         parts = [unquote(p) for p in u.path.split("/") if p]
+        if parts and parts[0] == "s" and len(parts) >= 4 and parts[2] == "api":
+            return self._session_post(parts[1], parts[3] if len(parts) > 3 else "", q)
         if not parts or parts[0] != "ingest" or len(parts) < 3:
             return self._send(404, b"not found", "text/plain")
         root = self._ingest_session(parts[1], q)
@@ -458,6 +543,68 @@ class Handler(BaseHTTPRequestHandler):
         code, out = IN.put_chunk(root, parts[2], n, data)
         self._send(code, json.dumps(out).encode(), "application/json")
 
+    # ---- run inputs: the APK under test and the brief it is tested from ----------
+
+    def _session_post(self, name: str, what: str, q: dict) -> None:
+        root = self._session(name)
+        if root is None:
+            return self._send(404, b"no such session", "text/plain")
+        if not self._authed(q):
+            return self._send(401, b"token required (see the URL adrd printed)", "text/plain")
+        if what == "upload":
+            return self._upload(root, q)
+        if what == "cases":
+            try:
+                out = UP.build_cases(root)
+            except UP.UploadError as e:
+                return self._send(e.status, json.dumps({"error": str(e)}).encode(),
+                                  "application/json")
+            return self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
+        if what == "run":
+            return self._run(root, name)
+        return self._send(404, b"not found", "text/plain")
+
+    def _upload(self, root: Path, q: dict) -> None:
+        try:
+            cl = int(self.headers.get("Content-Length") or -1)
+        except ValueError:
+            cl = -1
+        if cl < 0:
+            return self._send(411, b"content-length required", "text/plain")
+        try:
+            out = UP.stream_to(root, q.get("kind", [""])[0], q.get("name", [""])[0],
+                               self.rfile, cl)
+        except UP.UploadError as e:
+            self._drain(min(cl, 4 * 1024 * 1024))  # consume a little so the error lands
+            return self._send(e.status, json.dumps({"error": str(e)}).encode(),
+                              "application/json")
+        self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
+
+    def _run(self, root: Path, name: str) -> None:
+        apk = root / "inputs" / "app.apk"
+        if not apk.is_file():
+            return self._send(400, json.dumps({"error": "upload an .apk first"}).encode(),
+                              "application/json")
+        with RUN_LOCK:
+            if RUNS.get(name, {}).get("alive"):
+                return self._send(409, json.dumps({"error": "a run is already going"}).encode(),
+                                  "application/json")
+            RUNS[name] = {"alive": True}
+        threading.Thread(target=_run_guarded, args=(root, name, apk), daemon=True).start()
+        self._send(202, json.dumps({"ok": True, "log": "inputs/run.log"}).encode(),
+                   "application/json")
+
+    def _inputs(self, root: Path) -> None:
+        cases = read_json(root / "cases.json", None)
+        out = UP.listed(root)
+        out["cases"] = None if cases is None else {
+            "origin": cases.get("origin"), "count": len(cases.get("cases", []))}
+        out["running"] = bool(RUNS.get(root.name, {}).get("alive"))
+        log = root / "inputs" / "run.log"
+        out["log"] = log.read_text(encoding="utf-8", errors="replace")[-4000:] \
+            if log.is_file() else ""
+        self._send(200, json.dumps(out).encode(), "application/json")
+
     def _session_route(self, name: str, what: str, rest: list[str], q: dict) -> None:
         root = self._session(name)
         if root is None:
@@ -480,6 +627,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._zip(root)
         if what == "api" and rest and rest[0] == "export":
             return self._export(root)
+        if what == "api" and rest and rest[0] == "inputs":
+            return self._inputs(root)
         return self._send(404, b"not found", "text/plain")
 
     def _file(self, root: Path, rel: str, download: bool = False) -> None:

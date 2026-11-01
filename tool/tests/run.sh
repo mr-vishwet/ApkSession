@@ -252,6 +252,11 @@ check "$?" "chunked ingest pytest suite"
 tail -1 "$WORK/ingest-pytest.log" | grep -q "passed" \
   && echo "  ok   pytest suite reported passed" \
   || { echo "  FAIL pytest suite did not report passed"; fails=$((fails+1)); }
+"$PY" -m pytest -q "$SKILL/tests/test_uploads.py" > "$WORK/uploads-pytest.log" 2>&1
+check "$?" "run inputs pytest suite"
+tail -1 "$WORK/uploads-pytest.log" | grep -q "passed" \
+  && echo "  ok   uploads/cases/run suite reported passed" \
+  || { echo "  FAIL uploads suite did not report passed"; fails=$((fails+1)); }
 kill $WPID 2>/dev/null
 
 echo
