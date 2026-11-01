@@ -25,8 +25,24 @@ Spec: tasks/prd-apksession-device-ingest.md
   does not log an app out, use `pm clear` for a genuine cold start.
 - Emulator: AVD `demo35`, 1080x2400, boots in ~40 s and needs host GPU enabled. Host is M1 Air,
   8 GB RAM, no CUDA, disk near full — do not install a large toolchain to solve anything.
+- Reuse `AtomicTextFile.write(file, text)` (ingest/android) for any on-device record that must
+  never be read half-written: temp + flush + fd.sync + rename. `CheckpointStore` and `ClipStore`
+  both go through it; do not hand-roll a third atomic write.
+- `MediaMetadataRetriever.METADATA_KEY_MIMETYPE` returns the CONTAINER mime - an HEVC clip in an
+  mp4 reads back as `video/mp4`, so it cannot tell HEVC from H.264. Read the first video track's
+  `MediaFormat.KEY_MIME` through `MediaExtractor` for the real codec; MMR is still right for
+  width/height/bitrate.
+- The system photo picker returns `content://media/picker/0/com.android.providers.media.photopicker/media/<id>`,
+  whose `DISPLAY_NAME` is `"<id>.mp4"`. The camera's real filename only comes from the MediaStore
+  row lookup by id, which needs `READ_MEDIA_VIDEO`.
+- adb-pushed media can sit at `is_pending=1` with NULL `_size`/`date_modified`, which makes it
+  invisible to the photo picker ("No photos or videos") while `content query` still lists the row.
+  Fix by completing the scan: `adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE
+  -d file:///sdcard/DCIM/Camera/<name>` and wait a few seconds; verify `is_pending=0`.
 - `.gitignore` deliberately keeps unmasked client material out of version control. Never widen it to
-  make a commit easier, and never `git add -f` a session artifact.
+  make a commit easier, and never `git add -f` a session artifact. Note: `ingest/android/.gitignore`
+  used to ignore `proof/*.png`, which made PRD-mandated proof uncommittable; that line is gone, so
+  proof screenshots ARE versioned from US-004 on.
 - Proof screenshots must use generic or stock media only. Never drive the ingest app against a client
   app's screens or a client's real clips - `sessions/*/export/evidences/box-placement/*.png` shows why:
   those stills carry the client logo, product name and real user names, and they are NOT ignored by
@@ -108,4 +124,54 @@ _Append entries below. Never rewrite this file._
 - Not done tonight (deliberately out of US-002/US-003 scope): the client half that talks to the new
   routes (US-005), sha256 of the source on the client (US-009), dashboard registration of assembled
   files, and INGEST_NOTES.md numbers (US-010).
+---
+
+## [2026-11-01 13:01] - US-004
+- Photo picker + device metadata read, all in ingest/android. New: ClipResolver.kt (ClipFields +
+  ClipDataSource seam, ClipResolver refusing non-content URIs, ClipUri.mediaStoreId /
+  prefersRowName, ClipGeneration.id), ClipRecord.kt (ClipRecord + codecLabel/resolution/isHevc/
+  isFourK, ClipFormat, ClipStore), AndroidClipDataSource.kt (ContentResolver + MediaStore row
+  fallback + MediaMetadataRetriever + MediaExtractor), AtomicTextFile.kt, ClipResolverTest.kt.
+  Changed: MainActivity.kt (PickVisualMedia + RequestPermission + clip list UI), Checkpoint.kt
+  (now uses AtomicTextFile - behaviour unchanged, its 8 tests still pass), AndroidManifest.xml
+  (+READ_MEDIA_VIDEO only; no READ_EXTERNAL_STORAGE, no all-files), .gitignore (proof/*.png
+  un-ignored, .kotlin/ ignored).
+- Generation id is MediaStore DATE_MODIFIED + SIZE ("sz50357449-mt1793479559") and is persisted
+  with the picked item in files/picked_clips.txt, so a later story can notice the file changed.
+- Commands run, with real output:
+  - `./gradlew assembleDebug lint test` -> BUILD SUCCESSFUL in 2m 18s; test XMLs:
+    ChunkReaderTest tests=8 failures=0, ClipResolverTest tests=11 failures=0,
+    PlaceholderTest tests=1 failures=0; lint-results-debug.txt -> "0 errors, 18 warnings".
+  - `./tool/tests/run.sh` (tool/ untouched, run as a regression check) -> last line
+    "PASS  artifacts in /tmp/adrd-selftest.Vwgj/sessions/fixture-app-20261101-1253".
+  - `adb install -r app-debug.apk` -> Success. `pm clear dev.mrvishwet.adrd.ingest` -> Success
+    (cold start), then `am start -n dev.mrvishwet.adrd.ingest/.MainActivity`.
+  - tapping "Pick a device video" (540,349) opened
+    com.android.permissioncontroller/...GrantPermissionsActivity showing "Allow adrd ingest to
+    access photos and videos on this device?" -> proof/us004-permission-request.png. Allowing it
+    opened com.android.providers.media.module/...PhotoPickerActivity with the Videos grid.
+  - `run-as dev.mrvishwet.adrd.ingest cat .../files/picked_clips.txt` after picking the 4K clip:
+    uri=content://media/picker/0/com.android.providers.media.photopicker/media/1000000019
+    display_name=stock4k_10s.mp4 codec_mime=video/hevc width=3840 height=2160
+    bitrate_bps=40285959 size_bytes=50357449 generation_id=sz50357449-mt1793479559.
+    Cross-checked on the host against the same file: ffmpeg -i reports "hevc (Main) (hev1),
+    3840x2160, 40283 kb/s" and 50,357,449 bytes - matches.
+  - proof/US-004.png inspected: shows both clips, "stock4k_10s.mp4 / 4K HEVC / HEVC - 3840x2160 -
+    40.3 Mbps - 48.0 MiB" and "stockh264_1080p.mp4 / H.264 - 1920x1080 - 4.0 Mbps - 2.9 MiB".
+  - `am force-stop` then relaunch -> uiautomator still reports both cards, so the picked list is
+    genuinely persisted (proof/us004-after-restart.png).
+- Learnings for future iterations:
+  - The first device run exposed a real defect the JVM tests could not: the UI labelled the HEVC
+    clip "MPEG-4" because MediaMetadataRetriever reports the container mime. Any later story that
+    trusts METADATA_KEY_MIMETYPE for codec would be wrong - use the MediaExtractor track mime.
+  - The picker looked empty ("No photos or videos") because adb-pushed clips were left
+    is_pending=1; that is a device-state problem, not an app bug. Check is_pending before blaming
+    the picker.
+  - The picker's own DISPLAY_NAME is the row id, so without the MediaStore row fallback the list
+    would show "1000000022.mp4" instead of the camera filename.
+  - US-001's scaffold had gitignored proof/*.png; every story's acceptance criterion that says
+    "save a screenshot to ingest/android/proof/US-00X.png" now actually lands in version control.
+  - For US-005: the record already carries everything init needs (uri, size, generation id);
+    ChunkReader still needs a File, and a picker URI has no guaranteed path, so the client half
+    must stream from the content URI rather than reuse ChunkReader's RandomAccessFile directly.
 ---

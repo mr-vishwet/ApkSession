@@ -1,7 +1,6 @@
 package dev.mrvishwet.adrd.ingest
 
 import java.io.File
-import java.io.FileOutputStream
 
 /**
  * Resume state for one upload. Written only AFTER the server acked the chunk it
@@ -36,26 +35,14 @@ object CheckpointStore {
         require(cp.nextIndex >= 0 && cp.chunkSize > 0 && cp.sourceSize >= 0) {
             "checkpoint numbers must be non-negative (chunkSize positive)"
         }
-        val dir = file.absoluteFile.parentFile
-        dir.mkdirs()
-        val tmp = File(dir, file.name + ".tmp." + System.nanoTime())
-        FileOutputStream(tmp).use { fos ->
-            val text = buildString {
-                append("upload_id=").append(cp.uploadId).append('\n')
-                append("chunk_size=").append(cp.chunkSize).append('\n')
-                append("next_index=").append(cp.nextIndex).append('\n')
-                append("source_size=").append(cp.sourceSize).append('\n')
-                append("source_sha256=").append(cp.sourceSha256).append('\n')
-                append("source_generation_id=").append(cp.sourceGenerationId).append('\n')
-            }
-            fos.write(text.toByteArray(Charsets.UTF_8))
-            fos.flush()
-            fos.fd.sync()
-        }
-        if (!tmp.renameTo(file)) {
-            tmp.delete()
-            throw java.io.IOException("checkpoint rename failed for ${file.name}")
-        }
+        AtomicTextFile.write(file, buildString {
+            append("upload_id=").append(cp.uploadId).append('\n')
+            append("chunk_size=").append(cp.chunkSize).append('\n')
+            append("next_index=").append(cp.nextIndex).append('\n')
+            append("source_size=").append(cp.sourceSize).append('\n')
+            append("source_sha256=").append(cp.sourceSha256).append('\n')
+            append("source_generation_id=").append(cp.sourceGenerationId).append('\n')
+        })
     }
 
     /** null when no checkpoint exists; throws if a checkpoint exists but is malformed. */
