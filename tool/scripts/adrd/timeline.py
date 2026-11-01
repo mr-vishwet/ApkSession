@@ -92,6 +92,7 @@ def run(adb, session, walk: dict, recorder=None, size=None,
                          segments=[dict(s) for s in (recorder.segments if recorder else [])])
 
     steps = walk.get("steps", [])
+    pkg = walk.get("package") or ""
     for i, step in enumerate(steps):
         now = time.time()
         ev = {"i": i, "chapter": step.get("chapter"), "label": step.get("label", ""),
@@ -113,6 +114,16 @@ def run(adb, session, walk: dict, recorder=None, size=None,
             ev["mismatch"] = bool(step.get("expect_hash")) and differs(
                 int(step["expect_hash"], 16), h)
         time.sleep(settle)
+        ev["focus"] = adb.current_focus()
+        if pkg and ev["focus"] and not ev["focus"].startswith(pkg):
+            ev["off_app"] = ev["focus"]
+
+    stalled = [ev for ev in events if ev.get("off_app")]
+    if stalled:
+        print(f"OFF-APP: {len(stalled)} of {len(steps)} steps ended with "
+              f"{stalled[0]['off_app']} in front instead of the app. Those taps went "
+              "nowhere and the recording shows a system dialog - fix the device and "
+              "take again. The mask boxes for those seconds will be wrong too.")
 
     write_status(session.root, stage="finalising", i=len(steps), total=len(steps))
     if recorder:

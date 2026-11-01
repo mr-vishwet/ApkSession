@@ -164,6 +164,8 @@ def markdown(session, tl: dict, walk: dict, branding: dict, flow: dict | None,
                 marks.append(f"screen `{e['screen']}`")
             if e.get("mismatch"):
                 marks.append("screen did not match calibration")
+            if e.get("off_app"):
+                marks.append(f"**system window in front: {e['off_app']}**")
             if e.get("typed"):
                 marks.append(f"input {e['typed']}")
             A(f"| `{ff.tc(e['t'])}` | {detail} | {ops}"

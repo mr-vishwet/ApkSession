@@ -139,6 +139,41 @@ def test_routes_require_the_token(server):
 
 # ---- cases: from the brief when there is one, from the flow map when there is not --
 
+def test_a_step_that_ends_on_a_system_dialog_says_so(tmp_path, capsys):
+    """An automated round on a struggling emulator recorded "System UI isn't
+    responding" over the flow, every tap after it went nowhere, and the walk still
+    reported a clean pass - so the video looked finished and was not."""
+    from adrd import timeline as T
+    from adrd.session import Session
+
+    root = tmp_path / "s1"
+    root.mkdir()
+    (root / "state.json").write_text(json.dumps({"app": "demo"}))
+    s = Session(root)
+    walk = {"package": "com.demo.app", "steps": [
+        {"label": "open", "screen": "home", "chapter": "c1"},
+        {"label": "fill", "screen": "form", "chapter": "c1"}]}
+
+    class Dialog:
+        def screen_size(self):
+            return (1080, 2400)
+
+        def current_focus(self):
+            return "com.android.systemui/.anr.AnrDialog"
+
+    events = T.run(Dialog(), s, walk, settle=0)
+    assert [e["off_app"] for e in events] == ["com.android.systemui/.anr.AnrDialog"] * 2
+    assert "OFF-APP: 2 of 2 steps" in capsys.readouterr().out
+
+    class Healthy(Dialog):
+        def current_focus(self):
+            return "com.demo.app/.MainActivity"
+
+    events = T.run(Healthy(), s, walk, settle=0)
+    assert all("off_app" not in e for e in events)
+    assert "OFF-APP" not in capsys.readouterr().out
+
+
 def test_the_runs_own_records_are_never_mistaken_for_the_brief(server):
     """launch/take/render write run.log and run.json into inputs/, next to the brief.
     They sort after every real filename, so after one run the page named the log as the
