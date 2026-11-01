@@ -193,7 +193,7 @@ def test_run_starts_and_refuses_a_second_one(server, monkeypatch):
     release = threading.Event()
     started = threading.Event()
 
-    def fake_stages(root, name, apk):
+    def fake_stages(root, name, apk, raw=False):
         started.set()
         release.wait(10)
 
@@ -222,7 +222,7 @@ def test_a_crashing_stage_runner_frees_the_session_for_the_next_run(server, monk
     port, alpha = server
     upload(port, "apk", "app.apk", APK)
 
-    def crash(root, name, apk):
+    def crash(root, name, apk, raw=False):
         raise RuntimeError("stage runner died")
 
     monkeypatch.setattr(watch, "_run_stages", crash)
@@ -234,12 +234,62 @@ def test_a_crashing_stage_runner_frees_the_session_for_the_next_run(server, monk
     else:
         pytest.fail("a crashed run left the session locked")
 
-    monkeypatch.setattr(watch, "_run_stages", lambda r, n, a: None)
+    monkeypatch.setattr(watch, "_run_stages", lambda *a, **k: None)
     assert req(port, "POST", f"/s/alpha/api/run?t={TOKEN}")[0] == 202
+
+
+def test_export_excludes_the_unmasked_capture_unless_the_run_asks(server, monkeypatch):
+    """The bundle is what leaves the machine. Shipping unmasked client screens by default
+    is the leak this guards."""
+    import subprocess
+
+    port, alpha = server
+    upload(port, "apk", "app.apk", APK)
+
+    def record(cmd, *a, **k):
+        recorded.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    recorded = []
+    monkeypatch.setattr(watch.subprocess, "run", record)
+    req(port, "POST", f"/s/alpha/api/run?t={TOKEN}")
+    for _ in range(80):
+        if not watch.RUNS.get("alpha"):
+            break
+        time.sleep(0.1)
+    exports = [c for c in recorded if "export" in c]
+    assert exports, recorded
+    assert "--no-raw" in exports[0] and "--yes" not in exports[0]
+
+    recorded.clear()
+    req(port, "POST", f"/s/alpha/api/run?t={TOKEN}&raw=1")
+    for _ in range(80):
+        if not watch.RUNS.get("alpha"):
+            break
+        time.sleep(0.1)
+    exports = [c for c in recorded if "export" in c]
+    assert exports and "--yes" in exports[0] and "--no-raw" not in exports[0]
+
+
+def test_a_tunnel_pointed_at_another_port_is_not_reused(tmp_path, monkeypatch):
+    """Reusing a recorded tunnel whose origin is a different local port prints a URL
+    that 502s - the exact failure that breaks "open this anywhere" promises."""
+    d = tmp_path / "sessions"
+    d.mkdir()
+    watch.tunnel_record(d).write_text(json.dumps(
+        {"url": "https://x.trycloudflare.com", "pid": 999999,
+         "local": "http://127.0.0.1:8734"}))
+    monkeypatch.setattr(watch, "_alive", lambda pid: True)
+    assert watch.tunnel_status(d) == "https://x.trycloudflare.com"
+    assert watch.tunnel_status(d, 8734) == "https://x.trycloudflare.com"
+    assert watch.tunnel_status(d, 8735) is None
 
 
 def test_real_stage_list_is_the_cli_a_person_would_run():
     """The runner shells out to the same stages as the CLI; assert the sequence, not a mock."""
     src = Path(watch.__file__).read_text()
-    for stage in ('"launch"', '"take"', '"render"', '"sweep"', '"doc"', '"export"'):
+    for stage in ('"launch"', '"take"', '"brand"', '"render"', '"sweep"', '"doc"', '"export"'):
         assert stage in src
+    assert src.index('"brand"') < src.index('"render"'), "render needs branding.json first"
+    # `brand preset` with no --name only lists the presets and exits 2
+    assert '"--name", "debug-banner", "topbar-title", "status-bar"' in src

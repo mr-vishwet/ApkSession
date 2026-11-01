@@ -44,17 +44,17 @@ def _adrd_path() -> str:
     return _ADRD_PATH
 
 
-def _run_guarded(root: Path, name: str, apk: Path) -> None:
+def _run_guarded(root: Path, name: str, apk: Path, raw: bool = False) -> None:
     """Whatever happens to the stages, the session must stop being marked as running -
     otherwise one failed launch locks that session out of every later run."""
     try:
-        _run_stages(root, name, apk)
+        _run_stages(root, name, apk, raw)
     finally:
         with RUN_LOCK:
             RUNS.pop(name, None)
 
 
-def _run_stages(root: Path, name: str, apk: Path) -> None:
+def _run_stages(root: Path, name: str, apk: Path, raw: bool = False) -> None:
     """Run launch -> take -> render -> sweep -> doc -> export, one stage at a
     time, writing each stage to status.json and appending output to
     inputs/run.log so the dashboard can show progress."""
@@ -65,10 +65,14 @@ def _run_stages(root: Path, name: str, apk: Path) -> None:
     stages = [
         ("launch", [py, adrd, "launch", "--session", str(root), "--apk", str(apk), "--clear"]),
         ("take", [py, adrd, "take", "--session", str(root)]),
+        ("brand", [py, adrd, "brand", "preset", "--session", str(root),
+                   "--name", "debug-banner", "topbar-title", "status-bar"]),
         ("render", [py, adrd, "render", "--session", str(root), "--step-captions"]),
         ("sweep", [py, adrd, "sweep", "--session", str(root)]),
         ("doc", [py, adrd, "doc", "--session", str(root)]),
-        ("export", [py, adrd, "export", "--session", str(root), "--yes"]),
+        # the bundle excludes the unmasked capture unless the caller asked for it by name
+        ("export", [py, adrd, "export", "--session", str(root),
+                    "--yes" if raw else "--no-raw"]),
     ]
     for stage, cmd in stages:
         write_status(root, stage=stage)
@@ -259,6 +263,7 @@ video{width:100%;max-height:52vh;background:#000;border-radius:8px}
 <div class=stage><h2>Inputs</h2><div id=inputs></div>
 <div class=row><input type=file id=fApk accept=".apk"><button id=bApk>Upload APK</button></div>
 <div class=row><input type=file id=fBrief accept=".md,.markdown,.txt,.pdf"><button id=bBrief>Upload brief</button></div>
+<div class=row><label class=row style=margin:0><input type=checkbox id=raw>include the unmasked capture in the export bundle</label></div>
 <div class=row><button id=bCases>Build test cases</button><button id=bRun>Start run</button></div>
 <div id=inote></div><pre id=ilog style="max-height:190px;overflow:auto;font-size:11px;margin:8px 0 0"></pre>
 </div>
@@ -348,11 +353,11 @@ if(bc)bc.onclick=()=>{bc.disabled=1;note('building cases...');post('/api/cases')
  .catch(e=>note('cases failed: '+String(e).slice(0,120)))
  .finally(()=>{bc.disabled=0;});};
 const br=document.getElementById('bRun');
-if(br)br.onclick=()=>{br.disabled=1;note('run queued...');post('/api/run')
- .then(j=>{note(j&&j.ok?'run started - launch, take, render, sweep, doc, export':'queued: '+(j&&j.error||''),j&&j.ok);loadInputs();})
+if(br)br.onclick=()=>{br.disabled=1;const rw=document.getElementById('raw');note('run queued...');post('/api/run',rw&&rw.checked?{raw:1}:{})
+ .then(j=>{note(j&&j.ok?'run started - launch, take, brand, render, sweep, doc, export'+(j.export_includes_raw?' (export WILL carry the unmasked capture)':' (export excludes the unmasked capture)'):'queued: '+(j&&j.error||''),j&&j.ok);loadInputs();})
  .catch(e=>note('run failed: '+String(e).slice(0,140)))
  .finally(()=>{loadInputs();});};
-async function post(p){const r=await fetch(u(p),{method:'POST'});return r.ok?await r.json():Promise.reject((await r.json().catch(()=>({}))).error||('http '+r.status));}
+async function post(p,x){const r=await fetch(u(p,x),{method:'POST'});return r.ok?await r.json():Promise.reject((await r.json().catch(()=>({}))).error||('http '+r.status));}
 async function uploadFile(kind,inputId){const el=document.getElementById(inputId);const file=el.files[0];if(!file)return note('pick a '+kind+' file first');const btn=document.getElementById('b'+(kind==='apk'?'Apk':'Brief'));btn.disabled=1;btn.textContent='uploading...';note('sending '+kb(file.size));try{const r=await fetch(u('/api/upload',{kind,name:file.name}),{method:'POST',body:file});const j=await r.json();if(!r.ok)throw new Error(j.error||('http '+r.status));note(kind+' uploaded: '+j.name+' '+kb(j.bytes),1);el.value='';loadInputs();}catch(e){note('upload rejected: '+e.message);}finally{btn.disabled=0;btn.textContent=kind==='apk'?'Upload APK':'Upload brief';}}
 async function loadInputs(){const el=document.getElementById('inputs');if(!el)return;try{const j=await(await fetch(u('/api/inputs'))).json();el.innerHTML='<table><tr><td>APK</td><td>'+(j.apk?j.apk.name+' ('+kb(j.apk.bytes)+')':'none')+'</td></tr><tr><td>Brief</td><td>'+(j.brief?j.brief.name+' ('+kb(j.brief.bytes)+')':'none')+'</td></tr><tr><td>Cases</td><td>'+(j.cases?j.cases.count+' from '+j.cases.origin:'none')+' &nbsp;<a href="'+u('/f/CASES.md')+'">open</a></td></tr><tr><td>Running</td><td>'+(j.running?'yes':'no')+'</td></tr></table>';const lg=document.getElementById('ilog');if(lg)lg.textContent=j.log||'';const rb=document.getElementById('bRun');if(rb)rb.disabled=!!j.running;}catch(e){el.innerHTML='<pre>inputs fetch failed: '+e+'</pre>';}}
 tick();setInterval(tick,1500);setInterval(draw,900);
@@ -561,7 +566,7 @@ class Handler(BaseHTTPRequestHandler):
                                   "application/json")
             return self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
         if what == "run":
-            return self._run(root, name)
+            return self._run(root, name, q)
         return self._send(404, b"not found", "text/plain")
 
     def _upload(self, root: Path, q: dict) -> None:
@@ -580,19 +585,20 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json")
         self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
 
-    def _run(self, root: Path, name: str) -> None:
+    def _run(self, root: Path, name: str, q: dict) -> None:
         apk = root / "inputs" / "app.apk"
         if not apk.is_file():
             return self._send(400, json.dumps({"error": "upload an .apk first"}).encode(),
                               "application/json")
+        raw = q.get("raw", [""])[0] in ("1", "yes", "true")
         with RUN_LOCK:
             if RUNS.get(name, {}).get("alive"):
                 return self._send(409, json.dumps({"error": "a run is already going"}).encode(),
                                   "application/json")
             RUNS[name] = {"alive": True}
-        threading.Thread(target=_run_guarded, args=(root, name, apk), daemon=True).start()
-        self._send(202, json.dumps({"ok": True, "log": "inputs/run.log"}).encode(),
-                   "application/json")
+        threading.Thread(target=_run_guarded, args=(root, name, apk, raw), daemon=True).start()
+        self._send(202, json.dumps({"ok": True, "log": "inputs/run.log",
+                                    "export_includes_raw": raw}).encode(), "application/json")
 
     def _inputs(self, root: Path) -> None:
         cases = read_json(root / "cases.json", None)
@@ -776,12 +782,25 @@ def tunnel_record(sessions_dir: Path) -> Path:
     return Path(sessions_dir) / "tunnel.json"
 
 
-def tunnel_status(sessions_dir: Path) -> str | None:
-    """The hostname only stays fixed if the same cloudflared process keeps running."""
+def tunnel_status(sessions_dir: Path, port: int | None = None) -> str | None:
+    """The hostname only stays fixed if the same cloudflared process keeps running.
+
+    When a port is given, a recorded tunnel pointing at a *different* local port is not
+    reusable - handing it out would print a URL that 502s, because cloudflared forwards to
+    the origin it was started with, not to whatever port this call ended up on.
+    """
     d = read_json(tunnel_record(sessions_dir), None)
-    if d and d.get("url") and _alive(d.get("pid")):
-        return d["url"]
-    return None
+    if not (d and d.get("url") and _alive(d.get("pid"))):
+        return None
+    if port is not None:
+        local = str(d.get("local") or "")
+        if local and not local.endswith(f":{port}"):
+            try:
+                os.kill(int(d["pid"]), 15)
+            except (OSError, ValueError):
+                pass
+            return None
+    return d["url"]
 
 
 def tunnel(local_url: str, log: Path, sessions_dir: Path) -> str | None:
@@ -837,7 +856,7 @@ def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
         print(f"  session page {base}/s/{focus}/" + (f"?t={token}" if token else ""),
               flush=True)
     if public:
-        pub = tunnel_status(sessions_dir)
+        pub = tunnel_status(sessions_dir, port)
         if pub:
             print(f"  reusing the running tunnel {pub}", flush=True)
         else:
