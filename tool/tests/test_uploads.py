@@ -139,10 +139,14 @@ def test_routes_require_the_token(server):
 
 # ---- cases: from the brief when there is one, from the flow map when there is not --
 
-def test_a_step_that_ends_on_a_system_dialog_says_so(tmp_path, capsys):
+def test_a_system_dialog_that_survives_a_step_is_reported(tmp_path, capsys):
     """An automated round on a struggling emulator recorded "System UI isn't
-    responding" over the flow, every tap after it went nowhere, and the walk still
-    reported a clean pass - so the video looked finished and was not."""
+    responding" over the flow. Every tap after the dialog went nowhere, the walk still
+    reported a clean pass, and the video came out showing a stalled screen under mask
+    boxes placed for other screens. A single consent prompt is not that - the walk
+    answers those on purpose - so only a dialog that survives to the next step counts."""
+    from PIL import Image
+
     from adrd import timeline as T
     from adrd.session import Session
 
@@ -152,26 +156,54 @@ def test_a_step_that_ends_on_a_system_dialog_says_so(tmp_path, capsys):
     s = Session(root)
     walk = {"package": "com.demo.app", "steps": [
         {"label": "open", "screen": "home", "chapter": "c1"},
-        {"label": "fill", "screen": "form", "chapter": "c1"}]}
+        {"label": "fill", "screen": "form", "chapter": "c1"},
+        {"label": "save", "screen": "form", "chapter": "c1"}]}
+    DIALOG = "com.android.systemui/.anr.AnrDialog"
 
-    class Dialog:
+    class Stuck:
         def screen_size(self):
             return (1080, 2400)
 
+        def screencap(self, dest):
+            Stuck.n += 1
+            Image.new("RGB", (60, 100), (Stuck.n % 4, 0, 0)).save(dest)
+            return dest
+
         def current_focus(self):
-            return "com.android.systemui/.anr.AnrDialog"
+            return DIALOG
 
-    events = T.run(Dialog(), s, walk, settle=0)
-    assert [e["off_app"] for e in events] == ["com.android.systemui/.anr.AnrDialog"] * 2
-    assert "OFF-APP: 2 of 2 steps" in capsys.readouterr().out
+    Stuck.n = 0
+    events = T.run(Stuck(), s, walk, settle=0)
+    assert "stuck" not in events[0], "the first dialog is only a prompt"
+    assert [e.get("stuck") for e in events[1:]] == [DIALOG, DIALOG]
+    assert "STALLED: 2 of 3 steps" in capsys.readouterr().out
 
-    class Healthy(Dialog):
+    class Answered(Stuck):
+        """A consent prompt the walk dismisses: dialog, then the app, then the app."""
+        seen = 0
+
+        def current_focus(self):
+            Answered.seen += 1
+            return DIALOG if Answered.seen == 1 else "com.demo.app/.MainActivity"
+
+    events = T.run(Answered(), s, walk, settle=0)
+    assert all("stuck" not in e for e in events)
+    assert "STALLED" not in capsys.readouterr().out
+
+    class Frozen(Answered):
+        """The screen never changes although the app is in front: the taps are landing
+        on nothing and the walk would otherwise claim every step passed."""
+
+        def screencap(self, dest):
+            Image.new("RGB", (60, 100), (7, 7, 7)).save(dest)
+            return dest
+
         def current_focus(self):
             return "com.demo.app/.MainActivity"
 
-    events = T.run(Healthy(), s, walk, settle=0)
-    assert all("off_app" not in e for e in events)
-    assert "OFF-APP" not in capsys.readouterr().out
+    events = T.run(Frozen(), s, walk, settle=0)
+    assert [e.get("no_motion") for e in events] == [None, True, True]
+    assert "NO-MOTION: 2 steps in a row" in capsys.readouterr().out
 
 
 def test_the_runs_own_records_are_never_mistaken_for_the_brief(server):

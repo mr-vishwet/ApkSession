@@ -106,24 +106,37 @@ def run(adb, session, walk: dict, recorder=None, size=None,
         print(f"[{i:03d}] t={ev['t_raw']:7.2f} {ev['chapter'] or '-':<14} {ev['label'][:58]}")
         for op in step.get("do", []):
             _apply(adb, op, size, session, ev)
+        time.sleep(settle)
+        p = session.stills / f"chk_{i:03d}.png"
+        adb.screencap(p)
+        h = ahash(p)
+        ev["hash"] = hex(h)
         if step.get("verify"):
-            p = session.stills / f"chk_{i:03d}.png"
-            adb.screencap(p)
-            h = ahash(p)
-            ev["hash"] = hex(h)
             ev["mismatch"] = bool(step.get("expect_hash")) and differs(
                 int(step["expect_hash"], 16), h)
-        time.sleep(settle)
         ev["focus"] = adb.current_focus()
         if pkg and ev["focus"] and not ev["focus"].startswith(pkg):
-            ev["off_app"] = ev["focus"]
+            # one system dialog is a consent prompt the walk is meant to answer; the same
+            # window still in front on the next step means the taps are landing on nothing
+            if len(events) > 1 and events[-2]["focus"] == ev["focus"]:
+                ev["stuck"] = ev["focus"]
 
-    stalled = [ev for ev in events if ev.get("off_app")]
+    quiet = [i for i in range(1, len(events))
+             if events[i].get("hash") and events[i]["hash"] == events[i - 1]["hash"]]
+    for i in quiet:
+        events[i]["no_motion"] = True
+    if len(quiet) >= 2:
+        print(f"NO-MOTION: {len(quiet)} steps in a row left the screen identical "
+              f"(steps {quiet[0] + 1}-{quiet[-1] + 1} of {len(steps)}). The walk is not "
+              "advancing, so the captions burned in for those seconds describe screens "
+              "the recording never shows.")
+
+    stalled = [ev for ev in events if ev.get("stuck")]
     if stalled:
-        print(f"OFF-APP: {len(stalled)} of {len(steps)} steps ended with "
-              f"{stalled[0]['off_app']} in front instead of the app. Those taps went "
-              "nowhere and the recording shows a system dialog - fix the device and "
-              "take again. The mask boxes for those seconds will be wrong too.")
+        print(f"STALLED: {len(stalled)} of {len(steps)} steps ended with "
+              f"{stalled[0]['stuck']} still in front. Those taps went nowhere and the "
+              "recording shows a system dialog - fix the device and take again. The "
+              "mask boxes for those seconds will be wrong too.")
 
     write_status(session.root, stage="finalising", i=len(steps), total=len(steps))
     if recorder:

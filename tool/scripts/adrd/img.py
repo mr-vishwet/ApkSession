@@ -18,8 +18,8 @@ def _font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 def ahash(path: Path | str, size: int = 16) -> int:
-    im = Image.open(path).convert("L").resize((size, size), Image.BILINEAR)
-    px = list(im.getdata())
+    with Image.open(path) as opened:
+        px = opened.convert("L").resize((size, size), Image.BILINEAR).tobytes()
     mean = sum(px) / len(px)
     bits = 0
     for p in px:
