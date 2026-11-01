@@ -189,7 +189,8 @@ def render(session, tl: dict, blurs: list[dict], opts: dict) -> dict:
     caps = caption_plan(tl, size, position, opts.get("step_captions", False),
                         opts.get("clock", False))
     boxes = segment_bar(tl, size) if opts.get("progress", True) else []
-    graph = ff.build_graph(size, blurs, caps, position, boxes)
+    graph = ff.build_graph(size, blurs, caps, position, boxes,
+                           textdir=Path(session.root) / "render" / "captions")
     res_filters = len(blurs) + len(boxes) + len(caps)
     out = Path(opts["out"]) if opts.get("out") else session.path("final")
     vtt = out.with_suffix(".vtt")

@@ -345,6 +345,22 @@ def test_requests_still_answer_while_a_stream_is_open(server):
         held.close()
 
 
+def test_caption_with_an_apostrophe_cannot_break_the_filtergraph(tmp_path):
+    """A walk label like "open Let's Find Support" used to close the drawtext option
+    early, because ffmpeg has no escape for a quote inside single quotes. The commas of
+    the next enable='gte(t,..)*lt(t,..)' then read as filter separators and render died."""
+    from adrd import ff
+
+    caps = [{"text": "C00c open Let's Find Support", "enable": "gte(t,1.000)*lt(t,2.000)",
+             "fontsize": 40, "y": 100}]
+    graph, _ = ff.build_graph((1080, 2400), [], caps, "bottom", None,
+                              textdir=tmp_path / "captions")
+    assert "textfile=" in graph
+    assert "text=\"C00c" not in graph and "Let\\'s" not in graph
+    assert (tmp_path / "captions" / "cap00.txt").read_text() == "C00c open Let's Find Support"
+    assert "enable='gte(t,1.000)*lt(t,2.000)'" in graph
+
+
 def test_real_stage_list_is_the_cli_a_person_would_run():
     """The runner shells out to the same stages as the CLI; assert the sequence, not a mock."""
     src = Path(watch.__file__).read_text()

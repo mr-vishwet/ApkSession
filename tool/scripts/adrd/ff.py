@@ -137,7 +137,14 @@ def frame(video: Path, at: float, out: Path | str, height: int | None = None) ->
 
 
 def esc(text: str) -> str:
-    """drawtext escaping: backslash, colon, quote and % are graph-significant."""
+    """drawtext escaping for a value wrapped in single quotes: backslash, colon, quote
+    and % are graph-significant.
+
+    This cannot carry an apostrophe. ffmpeg's parser has no escape for a quote inside
+    single quotes, so `\\'` simply closes the option and the commas of the following
+    enable='gte(t,..)*lt(t,..)' stop being protected. Real caption text therefore goes
+    through textfile= (see _drawtext), and only fixed strings use this.
+    """
     return (str(text).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
                 .replace("%", "\\%").replace("\n", " ").replace("[", "\\[").replace("]", "\\]"))
 
@@ -206,6 +213,8 @@ def _drawtext(cap: dict, W: int, H: int, position: str) -> str:
         y = int(H * 0.885) if position == "bottom" else int(H * 0.075)
     if "expr" in cap:
         text = f"text='{cap['expr']}'"
+    elif cap.get("textfile"):
+        text = f"textfile={cap['textfile']}"
     else:
         text = f"text='{esc(cap.get('text', ''))}'"
     body = (
@@ -221,9 +230,21 @@ def _drawtext(cap: dict, W: int, H: int, position: str) -> str:
 
 def build_graph(video_size: tuple[int, int], blurs: list[dict],
                 captions: list[dict], position: str = "bottom",
-                boxes: list[dict] | None = None) -> str:
-    """One graph: brand rects blurred in-window, fill boxes, then caption overlays."""
+                boxes: list[dict] | None = None,
+                textdir: Path | None = None) -> str:
+    """One graph: brand rects blurred in-window, fill boxes, then caption overlays.
+
+    With a textdir, every caption is written to its own file and handed to drawtext as
+    textfile=, because filtergraph quoting cannot carry an apostrophe.
+    """
     W, H = video_size
+    if textdir is not None:
+        textdir.mkdir(parents=True, exist_ok=True)
+        for i, c in enumerate(captions):
+            if c.get("text") is not None and "expr" not in c:
+                p = textdir / f"cap{i:02d}.txt"
+                p.write_text(str(c["text"]), encoding="utf-8")
+                c["textfile"] = str(p)
     parts: list[str] = []
     label = "0:v"
     for i, b in enumerate(blurs):
