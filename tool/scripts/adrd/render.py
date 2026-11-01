@@ -35,9 +35,16 @@ PRESETS = {
 }
 
 
-def preset_entries(names: list[str], screens: list[str], size: tuple[int, int]) -> list[dict]:
+def preset_id(e: dict) -> tuple:
+    """A preset box is identified by its name and scope, so re-running one cannot stack."""
+    return (e.get("preset"), e.get("scope"))
+
+
+def preset_entries(names: list[str], screens: list[str], size: tuple[int, int],
+                   existing: list[dict] | None = None) -> list[dict]:
     """Preset fracs are resolved against `size` so they behave like hand-placed boxes."""
     out = []
+    have = {preset_id(e) for e in existing or []}
     W, H = size
     for n in names:
         pr = PRESETS[n]
@@ -48,6 +55,9 @@ def preset_entries(names: list[str], screens: list[str], size: tuple[int, int]) 
             e = entry(size, sc, px, pr["mode"], pr["sigma"], pr["label"],
                       f"preset {n}")
             e["preset"] = n
+            if preset_id(e) in have:
+                continue
+            have.add(preset_id(e))
             out.append(e)
     return out
 

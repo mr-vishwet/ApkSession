@@ -321,6 +321,49 @@ def test_mask_picker_box_lands_in_branding_and_rejects_bad_geometry(server, monk
     assert box[0]["scope"] == "screen:find_support" and box[0]["mode"] == "solid"
 
 
+def test_a_box_drawn_on_the_page_can_be_removed_from_the_page(server):
+    """The picker could only ever add. Undoing a box that landed on the wrong band meant
+    editing branding.json by hand while the run was reading it, so every box is listed
+    with a remove button and the endpoint honours it."""
+    port, alpha = server
+    (alpha / "timeline.json").write_text(json.dumps({"size": [1080, 2400], "events": []}))
+    code, out = req(port, "POST",
+                    f"/s/alpha/api/box?t={TOKEN}&screen=home&x=290&y=160&w=520&h=110"
+                    f"&label=wordmark&mode=solid")
+    assert code == 200, out
+
+    code, st = req(port, "GET", f"/s/alpha/state?t={TOKEN}")
+    assert code == 200, st
+    box = st["boxes"][0]
+    assert box["i"] == 0 and box["scope"] == "screen:home" and box["label"] == "wordmark"
+    assert [round(v, 3) for v in box["frac"]] == [0.269, 0.067, 0.481, 0.046]
+
+    code, out = req(port, "POST", f"/s/alpha/api/box?t={TOKEN}&op=rm&i=0")
+    assert code == 200 and out["left"] == 0, out
+    assert json.loads((alpha / "branding.json").read_text())["entries"] == []
+
+    for bad in ("i=0", "i=abc", "i=7", "i=-1"):
+        code, out = req(port, "POST", f"/s/alpha/api/box?t={TOKEN}&op=rm&{bad}")
+        assert code == 400, (bad, out)
+
+
+def test_a_preset_repeated_does_not_stack_boxes():
+    """The run stage calls `brand preset` every time, so a second pass used to append a
+    second copy of all five boxes over the same pixels - the render still looked masked
+    while telling nobody that the layer count had doubled."""
+    from adrd import render as R
+
+    first = R.preset_entries(["debug-banner", "topbar-title"], ["home", "find_support"],
+                             (1080, 2400))
+    assert len(first) == 1 + 2
+    second = R.preset_entries(["debug-banner", "topbar-title"], ["home", "find_support"],
+                              (1080, 2400), first)
+    assert second == []
+    # a screen the first pass never saw still gets its box
+    third = R.preset_entries(["topbar-title"], ["home", "needs"], (1080, 2400), first)
+    assert [e["scope"] for e in third] == ["screen:needs"]
+
+
 def test_server_is_threaded_so_the_live_view_cannot_wedge_it():
     """The dashboard holds /stream open for as long as a tab is looking at it. On a plain
     TCPServer that single handler blocked every other request and the page looked blank."""

@@ -143,6 +143,12 @@ check $? "output assertions" || true
 
 echo "== dashboard page script =="
 "$PY" "$SKILL/tests/check_page_js.py"; check $? "dashboard script parses"
+# the bracket checker is a stand-in; use a real JS parser whenever one is installed
+if command -v node >/dev/null 2>&1; then
+  "$PY" -c "import sys;sys.path.insert(0,'$SKILL/scripts');from adrd.watch import PAGE;open('$WORK/page.js','w').write(PAGE.split('<script>')[1].split('</script>')[0])" \
+    && node --check "$WORK/page.js"
+  check $? "dashboard script parses under node"
+fi
 
 echo "== dashboard =="
 PORT=$(( 8900 + RANDOM % 80 ))

@@ -337,10 +337,12 @@ def cmd_brand(a) -> int:
         if not a.name:
             print(f"presets: {', '.join(R.PRESETS)}", file=sys.stderr)
             return 2
-        added = R.preset_entries(a.name, screens, _ref_size(s, None, a.size))
+        added = R.preset_entries(a.name, screens, _ref_size(s, None, a.size),
+                                 b["entries"])
         b["entries"] += added
         s.write("branding", b)
-        print(f"added {len(added)} preset box(es)")
+        print(f"added {len(added)} preset box(es), "
+              f"{len(b['entries'])} box(es) total")
         if "topbar-title" in a.name and not screens:
             print("warn: no screen windows in timeline.json yet - presets bound to "
                   "screens resolve after a take. Run 'brand list' afterwards.")

@@ -179,10 +179,10 @@ def session_view(root: Path) -> dict:
     rend = read_json(s.path("render"), {})
     branding = read_json(s.path("branding"), {"entries": []})
     boxes = []
-    for e in branding.get("entries", []):
+    for i, e in enumerate(branding.get("entries", [])):
         frac = e.get("frac") or {}
-        boxes.append({"scope": e.get("scope", ""), "label": e.get("label", ""),
-                      "mode": e.get("mode", "blur"),
+        boxes.append({"i": i, "scope": e.get("scope", ""), "label": e.get("label", ""),
+                      "mode": e.get("mode", "blur"), "preset": e.get("preset") or "",
                       "frac": [frac.get("x", 0), frac.get("y", 0),
                                frac.get("w", 0), frac.get("h", 0)]})
     arts = []
@@ -280,6 +280,7 @@ video{width:100%;max-height:52vh;background:#000;border-radius:8px}
 <div id=pkWrap style="position:relative;cursor:crosshair;max-width:280px">
 <img id=pkImg style="width:100%;display:block" alt="screen still">
 <div id=pkBox style="position:absolute;border:2px solid #ff5252;background:rgba(255,82,82,.25);display:none"></div>
+<div id=pkOld style="position:absolute;inset:0;pointer-events:none"></div>
 </div>
 <div class=row><input id=pkLabel value="brand mark" style=flex:1>
 <select id=pkMode><option>solid</option><option>pixelate</option><option>blur</option></select></div>
@@ -343,7 +344,10 @@ async function tick(){let j;
    l.slice(0,400).map(e=>`<a href="${u('/f/'+e.rel,{dl:1})}" target=_blank>${e.rel}</a>`).join('')+
    (l.length>400?`<span class=n>...${l.length-400} more - use download all</span>`:'')})}
  const p=j.proof||{},bad=Object.keys(p).filter(k=>k.startsWith('unchanged'));
+ BOXES=j.boxes;pkOld();
  document.getElementById('mask').innerHTML=`<div>${j.boxes.length} box(es)</div>`+
+  j.boxes.map(b=>`<div class=row style=margin-top:4px><span class=n>${ht(b.scope.replace('screen:',''))} - ${ht(b.label)} (${ht(b.mode)})</span>`+
+   `<button data-rm=${b.i} style="margin-left:auto;background:#1b2230;color:#e6e9ef;border:1px solid #2b3648">remove</button></div>`).join('')+
   Object.entries(p).map(([k,v])=>`<span class="pill ${k.startsWith('strongly')?'ok':k.startsWith('unchanged')?'bad':''}">${v} ${k}</span>`).join(' ')+
   (bad.length?`<div class=warn style=margin-top:8px>${bad.length} box covers nothing - fix its screen name or rect</div>`:'')+
   '<div class=warn style=margin-top:10px>Everything on this page is UNMASKED '
@@ -353,7 +357,12 @@ async function tick(){let j;
  err.innerHTML=live.dataset.err?`<pre>${live.dataset.err}</pre>`:''}
 document.getElementById('vMask').onchange=tick;
 document.getElementById('vRaw').onchange=tick;
-let PKS={size:[0,0],stills:[]},pkDrag=null;
+let PKS={size:[0,0],stills:[]},BOXES=[],pkDrag=null;
+function ht(s){return String(s==null?'':s).split('').map(c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]||c)).join('')}
+function pkOld(){const o=document.getElementById('pkOld');if(!o)return;
+ const s=PKS.stills[+(document.getElementById('pkSel').value||0)];if(!s){o.innerHTML='';return}
+ o.innerHTML=BOXES.filter(b=>b.scope==='screen:'+s.screen||b.scope==='global').map(b=>
+  `<div title="${ht(b.label)}" style="position:absolute;border:1px solid #5ac8fa;left:${b.frac[0]*100}%;top:${b.frac[1]*100}%;width:${b.frac[2]*100}%;height:${b.frac[3]*100}%"></div>`).join('')}
 function pkPos(ev){const im=document.getElementById('pkImg');const r=im.getBoundingClientRect();
  const W=PKS.size[0]||im.naturalWidth||1,H=PKS.size[1]||im.naturalHeight||1;
  return[Math.round((ev.clientX-r.left)/r.width*W),Math.round((ev.clientY-r.top)/r.height*H)];}
@@ -372,7 +381,8 @@ async function loadPick(){const el=document.getElementById('pkSel');if(!el)retur
  try{const j=await(await fetch(u('/api/picklist'))).json();PKS=j;
   el.innerHTML=j.stills.length?j.stills.map((s,i)=>`<option value="${i}">${s.still} - ${s.screen}</option>`).join(''):'<option>no stills captured yet</option>';
   const im=document.getElementById('pkImg');if(j.stills.length)im.src=u('/f/stills/'+j.stills[0].still);
-  el.onchange=()=>{const s=j.stills[+el.value];if(s){document.getElementById('pkImg').src=u('/f/stills/'+s.still);pkDrag=null;pkDraw();}}}
+  pkOld();
+  el.onchange=()=>{const s=j.stills[+el.value];if(s){document.getElementById('pkImg').src=u('/f/stills/'+s.still);pkDrag=null;pkDraw();pkOld();}}}
  catch(e){}}
 const pa=document.getElementById('pkAdd');
 if(pa)pa.onclick=async()=>{const n=document.getElementById('pkNote');
@@ -386,6 +396,11 @@ if(pa)pa.onclick=async()=>{const n=document.getElementById('pkNote');
   n.textContent='added '+j.mode+' box on '+j.screen;tick();}
  catch(e){n.textContent='failed: '+e.message;}
  finally{pa.disabled=0;}};
+const mk=document.getElementById('mask');
+if(mk)mk.onclick=e=>{const b=e.target.closest&&e.target.closest('button');if(!b||!b.dataset.rm)return;
+ b.disabled=1;fetch(u('/api/box',{op:'rm',i:b.dataset.rm}),{method:'POST'}).then(r=>r.json())
+ .then(j=>{const n=document.getElementById('pkNote');if(n)n.textContent=j.error||('removed '+(j.label||'')+' - render again');tick();})
+ .catch(()=>{b.disabled=0;});};
 loadPick();setInterval(loadPick,20000);
 loadInputs();
 function ff(s){s=Math.max(0,s||0);return String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0')}
@@ -617,30 +632,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._box(root, q)
         return self._send(404, b"not found", "text/plain")
 
+    def _json(self, code: int, obj: dict) -> None:
+        self._send(code, json.dumps(obj).encode(), "application/json")
+
     def _box(self, root: Path, q: dict) -> None:
         """Draw-to-place masking box. Typed pixel coordinates were the failure here: three
         guesses at the wordmark all landed on the wrong band, so the box has to come from
         the still the reviewer is actually looking at."""
+        if q.get("op", [""])[0] == "rm":
+            return self._box_rm(root, q)
         screen = q.get("screen", [""])[0]
         label = (q.get("label", ["brand mark"])[0] or "brand mark")[:60].replace("\n", " ")
         mode = q.get("mode", ["solid"])[0]
         if mode not in ("blur", "pixelate", "solid"):
-            return self._send(400, json.dumps({"error": "mode must be blur, pixelate or solid"}).encode(),
-                              "application/json")
+            return self._json(400, {"error": "mode must be blur, pixelate or solid"})
         if not re.fullmatch(r"[A-Za-z0-9_:-]{1,64}", screen):
-            return self._send(400, json.dumps({"error": "unknown screen name"}).encode(),
-                              "application/json")
+            return self._json(400, {"error": "unknown screen name"})
         try:
             x, y, w, h = (int(q[k][0]) for k in ("x", "y", "w", "h"))
         except (KeyError, ValueError):
-            return self._send(400, json.dumps({"error": "x, y, w and h are required integers"}).encode(),
-                              "application/json")
+            return self._json(400, {"error": "x, y, w and h are required integers"})
         size = (read_json(root / "timeline.json", {}) or {}).get("size") or [0, 0]
         if w < 8 or h < 8 or x < 0 or y < 0 or (size[0] and x + w > size[0]) or \
            (size[1] and y + h > size[1]):
-            return self._send(400, json.dumps(
-                {"error": f"box {x},{y} {w}x{h} is not inside the {size[0]}x{size[1]} frame"}).encode(),
-                "application/json")
+            return self._json(400, {"error": f"box {x},{y} {w}x{h} is not inside the "
+                                             f"{size[0]}x{size[1]} frame"})
         cmd = [sys.executable, _adrd_path(), "brand", "add", "--session", str(root),
                "--screen", screen, "--rect", f"{x},{y},{w},{h}", "--label", label,
                "--mode", mode]
@@ -648,11 +664,27 @@ class Handler(BaseHTTPRequestHandler):
             cmd += ["--size", f"{size[0]}x{size[1]}"]
         cp = subprocess.run(cmd, capture_output=True, text=True)
         if cp.returncode != 0:
-            return self._send(500, json.dumps(
-                {"error": (cp.stdout + cp.stderr).strip()[-300:]}).encode(), "application/json")
-        self._send(200, json.dumps({"ok": True, "screen": screen,
-                                    "rect": [x, y, w, h], "label": label,
-                                    "mode": mode}).encode(), "application/json")
+            return self._json(500, {"error": (cp.stdout + cp.stderr).strip()[-300:]})
+        self._json(200, {"ok": True, "screen": screen, "rect": [x, y, w, h],
+                         "label": label, "mode": mode})
+
+    def _box_rm(self, root: Path, q: dict) -> None:
+        """A box that landed on the wrong band has to be removable from the page. Editing
+        branding.json by hand while a run is watching it was not workable."""
+        entries = (read_json(root / "branding.json", {}) or {}).get("entries", [])
+        try:
+            i = int(q.get("i", [""])[0])
+        except ValueError:
+            return self._json(400, {"error": "i must be a box index"})
+        if not 0 <= i < len(entries):
+            return self._json(400, {"error": f"no box {i} - {len(entries)} in the session"})
+        cp = subprocess.run([sys.executable, _adrd_path(), "brand", "rm", "--session", str(root),
+                             "--index", str(i)], capture_output=True, text=True)
+        if cp.returncode != 0:
+            return self._json(500, {"error": (cp.stdout + cp.stderr).strip()[-300:]})
+        gone = entries[i]
+        self._json(200, {"ok": True, "removed": i, "label": gone.get("label", ""),
+                         "left": len(entries) - 1})
 
     def _picklist(self, root: Path) -> None:
         tl = read_json(root / "timeline.json", {}) or {}
