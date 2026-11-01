@@ -285,6 +285,66 @@ def test_a_tunnel_pointed_at_another_port_is_not_reused(tmp_path, monkeypatch):
     assert watch.tunnel_status(d, 8735) is None
 
 
+def test_mask_picker_box_lands_in_branding_and_rejects_bad_geometry(server, monkeypatch):
+    """The picker exists because typed pixel rects were guessed three times and each
+    landed on the wrong band - so the box must come from the frame under review."""
+    port, alpha = server
+    (alpha / "timeline.json").write_text(json.dumps(
+        {"size": [1080, 2400], "events": [
+            {"still": str(alpha / "stills" / "x1.png"), "screen": "find_support",
+             "label": "step 1"}]}))
+    (alpha / "stills").mkdir()
+    (alpha / "stills" / "x1.png").write_bytes(b"not really a png, size is not read")
+
+    code, listing = req(port, "GET", f"/s/alpha/api/picklist?t={TOKEN}")
+    assert code == 200 and listing["size"] == [1080, 2400]
+    assert listing["stills"][0]["screen"] == "find_support"
+
+    bad = [
+        f"/s/alpha/api/box?t={TOKEN}&screen=find_support&mode=solid",
+        f"/s/alpha/api/box?t={TOKEN}&screen=find_support&mode=shrink&x=1&y=1&w=50&h=50",
+        f"/s/alpha/api/box?t={TOKEN}&screen=../../etc&x=1&y=1&w=50&h=50&mode=solid",
+        f"/s/alpha/api/box?t={TOKEN}&screen=find_support&x=900&y=100&w=500&h=500&mode=solid",
+        f"/s/alpha/api/box?t={TOKEN}&screen=find_support&x=0&y=0&w=2&h=2&mode=solid",
+    ]
+    for path in bad:
+        code, out = req(port, "POST", path)
+        assert code == 400, (path, out)
+
+    code, out = req(port, "POST",
+                    f"/s/alpha/api/box?t={TOKEN}&screen=find_support&x=290&y=160&w=520&h=110"
+                    f"&label=app%20bar%20wordmark&mode=solid")
+    assert code == 200, out
+    entries = json.loads((alpha / "branding.json").read_text())["entries"]
+    box = [e for e in entries if e["label"] == "app bar wordmark"]
+    assert box and box[0]["rect"] == {"x": 290, "y": 160, "w": 520, "h": 110}
+    assert box[0]["scope"] == "screen:find_support" and box[0]["mode"] == "solid"
+
+
+def test_server_is_threaded_so_the_live_view_cannot_wedge_it():
+    """The dashboard holds /stream open for as long as a tab is looking at it. On a plain
+    TCPServer that single handler blocked every other request and the page looked blank."""
+    import socketserver
+
+    assert issubclass(watch.Server, socketserver.ThreadingMixIn)
+    assert watch.Server.daemon_threads is True
+    assert watch.Server.block_on_close is False, "shutdown would wait on open streams"
+
+
+def test_requests_still_answer_while_a_stream_is_open(server):
+    import socket
+
+    port, _ = server
+    held = socket.create_connection(("127.0.0.1", port), timeout=5)
+    held.sendall(f"GET /s/alpha/stream?t={TOKEN} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    held.recv(4096)  # the stream keeps this connection alive
+    try:
+        assert req(port, "GET", f"/s/alpha/state?t={TOKEN}")[0] == 200
+        assert req(port, "GET", f"/s/alpha/api/inputs?t={TOKEN}")[0] == 200
+    finally:
+        held.close()
+
+
 def test_real_stage_list_is_the_cli_a_person_would_run():
     """The runner shells out to the same stages as the CLI; assert the sequence, not a mock."""
     src = Path(watch.__file__).read_text()

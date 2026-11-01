@@ -275,6 +275,18 @@ video{width:100%;max-height:52vh;background:#000;border-radius:8px}
 <div class=stage><h2>Chapters</h2><div class=rail id=rail></div></div>
 <div class=stage><h2>Artifacts</h2><div id=arts></div></div>
 <div class=stage><h2>Masking</h2><div id=mask></div></div>
+<div class=stage><h2>Mask picker</h2>
+<div class=row><select id=pkSel style=flex:1></select></div>
+<div id=pkWrap style="position:relative;cursor:crosshair;max-width:280px">
+<img id=pkImg style="width:100%;display:block" alt="screen still">
+<div id=pkBox style="position:absolute;border:2px solid #ff5252;background:rgba(255,82,82,.25);display:none"></div>
+</div>
+<div class=row><input id=pkLabel value="brand mark" style=flex:1>
+<select id=pkMode><option>solid</option><option>pixelate</option><option>blur</option></select></div>
+<div class=row><button id=pkAdd>Add mask box</button><span id=pkNote></span></div>
+<div class=warn style=margin-top:8px>Drag across the brand mark in the still. Typed pixel
+rects were the failure before - this reads the box off the frame you are looking at.</div>
+</div>
 <div class=stage><h2>Evidences <button id=allimg style=padding:2px 8px>download all</button></h2>
 <div class=evi id=evi></div></div>
 </div></main>
@@ -341,6 +353,40 @@ async function tick(){let j;
  err.innerHTML=live.dataset.err?`<pre>${live.dataset.err}</pre>`:''}
 document.getElementById('vMask').onchange=tick;
 document.getElementById('vRaw').onchange=tick;
+let PKS={size:[0,0],stills:[]},pkDrag=null;
+function pkPos(ev){const im=document.getElementById('pkImg');const r=im.getBoundingClientRect();
+ const W=PKS.size[0]||im.naturalWidth||1,H=PKS.size[1]||im.naturalHeight||1;
+ return[Math.round((ev.clientX-r.left)/r.width*W),Math.round((ev.clientY-r.top)/r.height*H)];}
+function pkDraw(){const b=document.getElementById('pkBox');
+ if(!pkDrag||!pkDrag.w||!pkDrag.h){b.style.display='none';return}
+ const W=PKS.size[0]||1,H=PKS.size[1]||1;b.style.display='block';
+ b.style.left=(pkDrag.x/W*100)+'%';b.style.top=(pkDrag.y/H*100)+'%';
+ b.style.width=(pkDrag.w/W*100)+'%';b.style.height=(pkDrag.h/H*100)+'%';}
+const pkW=document.getElementById('pkWrap');
+if(pkW){pkW.onpointerdown=e=>{e.preventDefault();const p=pkPos(e);pkDrag={ax:p[0],ay:p[1],x:p[0],y:p[1],w:0,h:0};pkW.setPointerCapture(e.pointerId)};
+ pkW.onpointermove=e=>{if(!pkDrag)return;const p=pkPos(e);
+  pkDrag.x=Math.min(pkDrag.ax,p[0]);pkDrag.y=Math.min(pkDrag.ay,p[1]);
+  pkDrag.w=Math.abs(p[0]-pkDrag.ax);pkDrag.h=Math.abs(p[1]-pkDrag.ay);pkDraw()};
+ pkW.onpointerup=()=>pkDraw();}
+async function loadPick(){const el=document.getElementById('pkSel');if(!el)return;
+ try{const j=await(await fetch(u('/api/picklist'))).json();PKS=j;
+  el.innerHTML=j.stills.length?j.stills.map((s,i)=>`<option value="${i}">${s.still} - ${s.screen}</option>`).join(''):'<option>no stills captured yet</option>';
+  const im=document.getElementById('pkImg');if(j.stills.length)im.src=u('/f/stills/'+j.stills[0].still);
+  el.onchange=()=>{const s=j.stills[+el.value];if(s){document.getElementById('pkImg').src=u('/f/stills/'+s.still);pkDrag=null;pkDraw();}}}
+ catch(e){}}
+const pa=document.getElementById('pkAdd');
+if(pa)pa.onclick=async()=>{const n=document.getElementById('pkNote');
+ if(!pkDrag||pkDrag.w<8||pkDrag.h<8){n.textContent='drag a box over the mark first';return}
+ const s=PKS.stills[+(document.getElementById('pkSel').value||0)];if(!s){n.textContent='no still selected';return}
+ pa.disabled=1;n.textContent='adding...';
+ try{const r=await fetch(u('/api/box',{screen:s.screen,x:pkDrag.x,y:pkDrag.y,w:pkDrag.w,h:pkDrag.h,
+   label:document.getElementById('pkLabel').value||'brand mark',
+   mode:document.getElementById('pkMode').value}),{method:'POST'});
+  const j=await r.json();if(!r.ok)throw new Error(j.error||('http '+r.status));
+  n.textContent='added '+j.mode+' box on '+j.screen;tick();}
+ catch(e){n.textContent='failed: '+e.message;}
+ finally{pa.disabled=0;}};
+loadPick();setInterval(loadPick,20000);
 loadInputs();
 function ff(s){s=Math.max(0,s||0);return String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0')}
 function kb(n){return n>1e6?(n/1e6).toFixed(1)+' MB':Math.round(n/1024)+' KB'}
@@ -567,7 +613,58 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
         if what == "run":
             return self._run(root, name, q)
+        if what == "box":
+            return self._box(root, q)
         return self._send(404, b"not found", "text/plain")
+
+    def _box(self, root: Path, q: dict) -> None:
+        """Draw-to-place masking box. Typed pixel coordinates were the failure here: three
+        guesses at the wordmark all landed on the wrong band, so the box has to come from
+        the still the reviewer is actually looking at."""
+        screen = q.get("screen", [""])[0]
+        label = (q.get("label", ["brand mark"])[0] or "brand mark")[:60].replace("\n", " ")
+        mode = q.get("mode", ["solid"])[0]
+        if mode not in ("blur", "pixelate", "solid"):
+            return self._send(400, json.dumps({"error": "mode must be blur, pixelate or solid"}).encode(),
+                              "application/json")
+        if not re.fullmatch(r"[A-Za-z0-9_:-]{1,64}", screen):
+            return self._send(400, json.dumps({"error": "unknown screen name"}).encode(),
+                              "application/json")
+        try:
+            x, y, w, h = (int(q[k][0]) for k in ("x", "y", "w", "h"))
+        except (KeyError, ValueError):
+            return self._send(400, json.dumps({"error": "x, y, w and h are required integers"}).encode(),
+                              "application/json")
+        size = (read_json(root / "timeline.json", {}) or {}).get("size") or [0, 0]
+        if w < 8 or h < 8 or x < 0 or y < 0 or (size[0] and x + w > size[0]) or \
+           (size[1] and y + h > size[1]):
+            return self._send(400, json.dumps(
+                {"error": f"box {x},{y} {w}x{h} is not inside the {size[0]}x{size[1]} frame"}).encode(),
+                "application/json")
+        cmd = [sys.executable, _adrd_path(), "brand", "add", "--session", str(root),
+               "--screen", screen, "--rect", f"{x},{y},{w},{h}", "--label", label,
+               "--mode", mode]
+        if size[0]:
+            cmd += ["--size", f"{size[0]}x{size[1]}"]
+        cp = subprocess.run(cmd, capture_output=True, text=True)
+        if cp.returncode != 0:
+            return self._send(500, json.dumps(
+                {"error": (cp.stdout + cp.stderr).strip()[-300:]}).encode(), "application/json")
+        self._send(200, json.dumps({"ok": True, "screen": screen,
+                                    "rect": [x, y, w, h], "label": label,
+                                    "mode": mode}).encode(), "application/json")
+
+    def _picklist(self, root: Path) -> None:
+        tl = read_json(root / "timeline.json", {}) or {}
+        seen, out = set(), []
+        for e in tl.get("events", []):
+            still = (e.get("still") or "").split("/")[-1]
+            if still and still not in seen:
+                seen.add(still)
+                out.append({"still": still, "screen": e.get("screen") or "",
+                            "label": e.get("label") or ""})
+        self._send(200, json.dumps({"size": tl.get("size") or [], "stills": out}).encode(),
+                   "application/json")
 
     def _upload(self, root: Path, q: dict) -> None:
         try:
@@ -635,6 +732,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._export(root)
         if what == "api" and rest and rest[0] == "inputs":
             return self._inputs(root)
+        if what == "api" and rest and rest[0] == "picklist":
+            return self._picklist(root)
         return self._send(404, b"not found", "text/plain")
 
     def _file(self, root: Path, rel: str, download: bool = False) -> None:
@@ -726,9 +825,14 @@ class Handler(BaseHTTPRequestHandler):
     do_HEAD = do_GET
 
 
-class Server(socketserver.TCPServer):
+class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    """Threading matters: the live view holds an open /stream for as long as a tab is
+    looking at it. On a plain TCPServer that one connection blocks every other request,
+    so opening the dashboard appeared to take the whole tool down."""
+
     allow_reuse_address = True
     daemon_threads = True
+    block_on_close = False
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
