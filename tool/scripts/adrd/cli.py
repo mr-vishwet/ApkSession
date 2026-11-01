@@ -459,6 +459,18 @@ def cmd_render(a) -> int:
     })
     res["masks"] = len(blurs)
     res["unmatched_scopes"] = warn
+    real = ff.duration(Path(res["video"]))
+    res["rendered_seconds"] = round(real, 3)
+    if tl["duration"] - real > 0.5:
+        # screenrecord's container runs longer than the frames it holds, so the last
+        # chapter would otherwise cite a timecode past the end of the file
+        for c in tl["chapters"]:
+            c["t1"] = min(c["t1"], real)
+        tl["duration"] = round(real, 3)
+        s.write("timeline", tl)
+        Path(res["vtt"]).write_text(ff.webvtt(tl["chapters"]))
+        print(f"note: the finished file runs {real:.2f}s, shorter than the timeline "
+              "claimed; chapter ends and the chapter list now match the player")
     res["proof"] = R.proof(s, tl, blurs, Path(res["video"]))
     s.write("render", res)
     pr = res["proof"]
