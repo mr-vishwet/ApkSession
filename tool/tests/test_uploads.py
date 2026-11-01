@@ -380,6 +380,30 @@ def test_hostname_without_cloudflare_fails_loudly(tmp_path, monkeypatch):
                         hostname="live.example.com") is None
 
 
+def test_step_captions_get_their_own_slice_when_the_clock_collapses():
+    """screenrecord drops idle frames, so a paused walkthrough can put every step on the
+    same video instant and all the captions burn in together."""
+    from adrd.render import step_windows
+
+    collapsed = [23.993] * 5
+    wins = step_windows(collapsed, 20.0, 50.0, 120.0)
+    assert len(wins) == 5
+    starts = [s for s, _ in wins]
+    assert starts == sorted(starts) and len(set(starts)) == 5, starts
+    assert all(e - s >= 0.6 for s, e in wins)
+    assert wins[0][0] >= 20.0 and wins[-1][1] <= 50.0 + 0.001
+
+    distinct = step_windows([5.0, 12.0, 30.0], 0.0, 40.0, 60.0)
+    assert distinct == [(5.0, 12.0), (12.0, 30.0), (30.0, 40.0)]
+
+    assert step_windows([], 0.0, 10.0, 10.0) == []
+
+    # steps recorded out of order still play in walk order, never overlapping
+    messy = step_windows([10.0, 10.0, 4.0], 0.0, 30.0, 30.0)
+    assert [s for s, _ in messy] == sorted(s for s, _ in messy)
+    assert all(messy[i][1] <= messy[i + 1][1] for i in range(len(messy) - 1))
+
+
 def test_real_stage_list_is_the_cli_a_person_would_run():
     """The runner shells out to the same stages as the CLI; assert the sequence, not a mock."""
     src = Path(watch.__file__).read_text()

@@ -136,6 +136,33 @@ def expand(branding: dict, tl: dict, size: tuple[int, int],
     return out
 
 
+def step_windows(times: list[float], t0: float, t1: float, total: float,
+                 minimum: float = 0.6) -> list[tuple[float, float]]:
+    """One window per step caption, in walk order.
+
+    screenrecord encodes on surface invalidation rather than on a clock, so a paused
+    walkthrough collapses: several steps land on the same video instant and every caption
+    would burn in on top of the others. When the recorded instants are not distinct the
+    steps are spread evenly across the chapter instead.
+    """
+    n = len(times)
+    if n == 0:
+        return []
+    end = min(t1, total) if total else t1
+    if len({round(t, 3) for t in times}) == 1:
+        step = max(minimum, (end - t0) / n)
+        starts = [t0 + i * step for i in range(n)]
+    else:
+        starts = [min(max(t, t0), end) for t in times]
+    for i in range(1, n):
+        starts[i] = max(starts[i], starts[i - 1] + minimum)
+    out = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < n else max(end, s + minimum)
+        out.append((s, max(e, s + minimum)))
+    return out
+
+
 def caption_plan(tl: dict, size: tuple[int, int], position: str = "bottom",
                  step_captions: bool = False, clock: bool = False) -> list[dict]:
     W, H = size
@@ -150,12 +177,11 @@ def caption_plan(tl: dict, size: tuple[int, int], position: str = "bottom",
                      "y": int(H * (0.865 if position == "bottom" else 0.055))})
         if step_captions:
             inside = [e for e in tl["events"] if c["t0"] <= e["t"] < c["t1"] and e.get("label")]
-            for k, e in enumerate(inside):
-                nxt = inside[k + 1:]
-                t1 = min(c["t1"], nxt[0]["t"] if nxt else total)
+            windows = step_windows([e["t"] for e in inside], c["t0"], c["t1"], total)
+            for e, (t_start, t_end) in zip(inside, windows):
                 caps.append({"text": e["label"], "y": int(H * (0.915 if position == "bottom" else 0.115)),
                              "fontsize": max(18, int(H * 0.021)),
-                             "enable": f"gte(t,{e['t']:.3f})*lt(t,{max(t1, e['t'] + 0.4):.3f})",
+                             "enable": f"gte(t,{t_start:.3f})*lt(t,{t_end:.3f})",
                              "boxcolor": "black@0.5"})
     if clock:
         caps.append({"expr": "%{pts\\:hms}", "x": int(W * 0.02),
