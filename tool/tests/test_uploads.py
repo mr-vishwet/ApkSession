@@ -361,6 +361,25 @@ def test_caption_with_an_apostrophe_cannot_break_the_filtergraph(tmp_path):
     assert "enable='gte(t,1.000)*lt(t,2.000)'" in graph
 
 
+def test_named_tunnel_config_routes_the_fixed_host(tmp_path):
+    """`--url` only exists for quick tunnels, so a named tunnel needs an ingress file -
+    and cloudflared rejects a config without a catch-all rule."""
+    p = watch.tunnel_config(tmp_path, "live", "abc-123", "live.example.com",
+                            "http://127.0.0.1:8734")
+    txt = p.read_text()
+    assert "tunnel: abc-123" in txt
+    assert "hostname: live.example.com" in txt
+    assert "service: http://127.0.0.1:8734" in txt
+    assert "http_status:404" in txt
+    assert str(Path.home() / ".cloudflared" / "live.json") in txt
+
+
+def test_hostname_without_cloudflare_fails_loudly(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch.shutil, "which", lambda name: None)
+    assert watch.tunnel("http://127.0.0.1:8734", tmp_path / "t.log", tmp_path,
+                        hostname="live.example.com") is None
+
+
 def test_real_stage_list_is_the_cli_a_person_would_run():
     """The runner shells out to the same stages as the CLI; assert the sequence, not a mock."""
     src = Path(watch.__file__).read_text()

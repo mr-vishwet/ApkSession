@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -61,7 +62,8 @@ def cmd_watch(a) -> int:
     srv = W.start(s.root.parent, port=a.port, host="0.0.0.0" if a.lan else a.host,
                   token=a.token, adb=adb, focus=s.root.name,
                   open_browser=not a.no_browser, public=a.public, expires_h=a.expires,
-                  allow_unmasked=not a.hide_unmasked)
+                  allow_unmasked=not a.hide_unmasked,
+                  hostname=getattr(a, "hostname", None))
     if srv.public_url:
         s.update_state(public_url=srv.public_url)
     try:
@@ -546,6 +548,13 @@ def cmd_tunnel(a) -> int:
     """One long-lived tunnel so the public hostname survives dashboard restarts."""
     s = Session(a.session)
     d = s.root.parent
+    if getattr(a, "login", False):
+        if not shutil.which("cloudflared"):
+            print("cloudflared is not installed", file=sys.stderr)
+            return 1
+        print("cloudflared opens a browser here. Sign in to the Cloudflare account that "
+              "owns the zone you want, then re-run with --hostname.", flush=True)
+        return subprocess.call(["cloudflared", "tunnel", "login"])
     if a.stop:
         rec = W.read_json(W.tunnel_record(d), {})
         if rec.get("pid"):
@@ -557,11 +566,11 @@ def cmd_tunnel(a) -> int:
         print("tunnel stopped")
         return 0
     live = W.tunnel_status(d)
-    if live and not a.restart:
+    if live and not a.restart and not a.hostname:
         print(live)
         return 0
     port = a.port or int((W.read_json(W.tunnel_record(d), {}) or {}).get("local", "x:0").rsplit(":", 1)[-1]) or 8734
-    url = W.tunnel(f"http://127.0.0.1:{port}", d / "tunnel.log", d)
+    url = W.tunnel(f"http://127.0.0.1:{port}", d / "tunnel.log", d, hostname=a.hostname)
     print(url or "tunnel did not come up")
     return 0 if url else 1
 
@@ -764,6 +773,8 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--lan", action="store_true",
                    help="bind 0.0.0.0; a token is then generated and required")
     w.add_argument("--token")
+    w.add_argument("--hostname",
+                   help="fixed public host for --public; needs `adrd tunnel --login` once")
     w.add_argument("--public", action="store_true",
                    help="expose through a cloudflared quick tunnel; token is forced on")
     w.add_argument("--expires", type=float, default=6.0)
@@ -787,6 +798,10 @@ def build_parser() -> argparse.ArgumentParser:
     tn.add_argument("--session", required=True)
     tn.add_argument("--stop", action="store_true")
     tn.add_argument("--restart", action="store_true")
+    tn.add_argument("--login", action="store_true",
+                    help="one-time Cloudflare browser sign-in that makes --hostname usable")
+    tn.add_argument("--hostname",
+                    help="fixed public host, e.g. live.example.com; needs `tunnel --login`")
     tn.add_argument("--port", type=int)
     tn.set_defaults(fn=cmd_tunnel)
 

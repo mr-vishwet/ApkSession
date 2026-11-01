@@ -907,14 +907,82 @@ def tunnel_status(sessions_dir: Path, port: int | None = None) -> str | None:
     return d["url"]
 
 
-def tunnel(local_url: str, log: Path, sessions_dir: Path) -> str | None:
-    """Expose the dashboard through a Cloudflare quick tunnel (no account, no install).
+def cf_cert() -> Path:
+    return Path.home() / ".cloudflared" / "cert.pem"
 
-    The URL is random and dies with this process. Nothing is registered or persisted.
+
+def tunnel_config(sessions_dir: Path, name: str, uuid: str, hostname: str,
+                  local_url: str) -> Path:
+    """A named tunnel needs an ingress file; --url only exists for quick tunnels."""
+    p = sessions_dir / f"{name}.yml"
+    p.write_text(
+        f"tunnel: {uuid}\n"
+        f"credentials-file: {Path.home() / '.cloudflared' / (name + '.json')}\n"
+        f"ingress:\n"
+        f"  - hostname: {hostname}\n"
+        f"    service: {local_url}\n"
+        f"  - service: http_status:404\n", encoding="utf-8")
+    return p
+
+
+def named_tunnel(local_url: str, log: Path, sessions_dir: Path, hostname: str) -> str | None:
+    """A fixed hostname that survives restarts, so the URL you bookmark is the URL you
+    open tomorrow. Needs one `cloudflared tunnel login` and a zone in that account."""
+    name = re.sub(r"[^a-z0-9-]", "-", hostname.split(".")[0])[:40] or "adrd"
+    cred = Path.home() / ".cloudflared" / f"{name}.json"
+    with log.open("a") as fh:
+        if not cred.exists():
+            cp = subprocess.run(["cloudflared", "tunnel", "create", name],
+                                stdout=fh, stderr=subprocess.STDOUT, text=True)
+            if cp.returncode != 0 or not cred.exists():
+                return None
+        uuid = json.loads(cred.read_text()).get("tunnel_id") or name
+        cfg = tunnel_config(sessions_dir, name, uuid, hostname, local_url)
+        if not (sessions_dir / f"{name}.routed").exists():
+            cp = subprocess.run(["cloudflared", "tunnel", "route", "dns", name, hostname],
+                                stdout=fh, stderr=subprocess.STDOUT, text=True)
+            if cp.returncode != 0:
+                return None
+            (sessions_dir / f"{name}.routed").write_text(hostname)
+        proc = subprocess.Popen(["cloudflared", "tunnel", "--no-autoupdate",
+                                 "--config", str(cfg), "run"],
+                                stdout=fh, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        if _alive(proc.pid):
+            tunnel_record(sessions_dir).write_text(json.dumps(
+                {"url": f"https://{hostname}", "pid": proc.pid, "local": local_url,
+                 "tunnel_name": name, "named": True,
+                 "since": time.strftime("%Y-%m-%d %H:%M:%S")}))
+            return f"https://{hostname}"
+        time.sleep(0.5)
+    return None
+
+
+def tunnel(local_url: str, log: Path, sessions_dir: Path,
+           hostname: str | None = None) -> str | None:
+    """Expose the dashboard through Cloudflare.
+
+    With a hostname and a Cloudflare login this is a named tunnel: the URL is yours and
+    does not change when the process restarts. Without them it is a quick tunnel - no
+    account and no install, but the hostname is random and dies with the process, so
+    nothing about it can be bookmarked.
     """
     if not shutil.which("cloudflared"):
         print("cloudflared not found; install it or use --lan", file=sys.stderr)
         return None
+    if hostname:
+        if not cf_cert().exists():
+            print(f"  no Cloudflare login at {cf_cert()} - cannot bind {hostname}.\n"
+                  f"  one-time: cloudflared tunnel login   (opens a browser)\n"
+                  f"  falling back to a quick tunnel with a throwaway hostname",
+                  file=sys.stderr)
+        else:
+            got = named_tunnel(local_url, log, sessions_dir, hostname)
+            if got:
+                return got
+            print("  named tunnel did not come up; see the dashboard log", file=sys.stderr)
     log.parent.mkdir(parents=True, exist_ok=True)
     fh = open(log, "w")
     proc = subprocess.Popen(["cloudflared", "tunnel", "--no-autoupdate", "--url", local_url],
@@ -938,7 +1006,8 @@ def tunnel(local_url: str, log: Path, sessions_dir: Path) -> str | None:
 def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
           token: str | None = None, adb=None, focus: str | None = None,
           open_browser: bool = True, public: bool = False,
-          expires_h: float = 6.0, allow_unmasked: bool = True) -> Server:
+          expires_h: float = 6.0, allow_unmasked: bool = True,
+          hostname: str | None = None) -> Server:
     """Start the dashboard. Returns the server; call shutdown_all() when done."""
     sessions_dir = Path(sessions_dir).resolve()
     sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -960,12 +1029,15 @@ def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
         print(f"  session page {base}/s/{focus}/" + (f"?t={token}" if token else ""),
               flush=True)
     if public:
+        rec = read_json(tunnel_record(sessions_dir), {}) or {}
         pub = tunnel_status(sessions_dir, port)
+        if pub and bool(rec.get("named")) != bool(hostname):
+            pub = None  # a throwaway quick URL is not what --hostname asked for
         if pub:
             print(f"  reusing the running tunnel {pub}", flush=True)
         else:
             pub = tunnel(f"http://127.0.0.1:{port}", sessions_dir / "tunnel.log",
-                         sessions_dir)
+                         sessions_dir, hostname=hostname)
         if pub:
             page = f"{pub}/s/{focus}/?t={token}" if focus else f"{pub}/?t={token}"
             print(f"PUBLIC {page}", flush=True)
