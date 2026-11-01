@@ -190,20 +190,61 @@ def test_a_system_dialog_that_survives_a_step_is_reported(tmp_path, capsys):
     assert all("stuck" not in e for e in events)
     assert "STALLED" not in capsys.readouterr().out
 
-    class Frozen(Answered):
-        """The screen never changes although the app is in front: the taps are landing
-        on nothing and the walk would otherwise claim every step passed."""
+
+def test_a_step_that_misses_its_calibrated_screen_is_counted(tmp_path, capsys):
+    """The scout pass is the calibration: it records what each step is supposed to land
+    on, and the take compares. Without that write-back a walk that never left the
+    postcode form reported fourteen clean steps."""
+    from PIL import Image
+
+    from adrd import timeline as T
+    from adrd.img import ahash
+    from adrd.session import Session
+
+    root = tmp_path / "s2"
+    (root / "stills").mkdir(parents=True)
+    (root / "state.json").write_text(json.dumps({"app": "demo"}))
+    s = Session(root)
+
+    def pattern(seed):
+        im = Image.new("L", (64, 64))
+        for x in range(64):
+            for y in range(64):
+                im.putpixel((x, y), 255 if (x // 8 + y // 8 + seed) % 2 else 0)
+        return im
+
+    pattern(0).save(root / "stills" / "screen_a.png")
+    pattern(3).save(root / "stills" / "screen_b.png")
+    a = hex(ahash(root / "stills" / "screen_a.png"))
+    b = hex(ahash(root / "stills" / "screen_b.png"))
+    assert a != b, "the two calibration screens must be distinguishable"
+
+    class Device:
+        def screen_size(self):
+            return (1080, 2400)
 
         def screencap(self, dest):
-            Image.new("RGB", (60, 100), (7, 7, 7)).save(dest)
+            pattern(0).save(dest)
             return dest
 
         def current_focus(self):
             return "com.demo.app/.MainActivity"
 
-    events = T.run(Frozen(), s, walk, settle=0)
-    assert [e.get("no_motion") for e in events] == [None, True, True]
-    assert "NO-MOTION: 2 steps in a row" in capsys.readouterr().out
+    walk = {"package": "com.demo.app", "steps": [
+        {"label": f"s{i}", "screen": "form", "chapter": "c1", "verify": True}
+        for i in range(3)]}
+    for st in walk["steps"]:
+        st["expect_hash"] = a
+    events = T.run(Device(), s, walk, settle=0)
+    assert not any(e.get("mismatch") for e in events)
+    assert "CALIBRATION" not in capsys.readouterr().out
+
+    for st in walk["steps"]:
+        st["expect_hash"] = b
+    events = T.run(Device(), s, walk, settle=0)
+    assert [e.get("mismatch") for e in events] == [True] * 3
+    out = capsys.readouterr().out
+    assert "CALIBRATION: 3 of 3 steps" in out and "2 of those are consecutive" in out
 
 
 def test_the_runs_own_records_are_never_mistaken_for_the_brief(server):

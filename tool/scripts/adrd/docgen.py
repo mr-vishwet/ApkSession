@@ -166,8 +166,6 @@ def markdown(session, tl: dict, walk: dict, branding: dict, flow: dict | None,
                 marks.append("screen did not match calibration")
             if e.get("stuck"):
                 marks.append(f"**system dialog stuck in front: {e['stuck']}**")
-            if e.get("no_motion"):
-                marks.append("**screen unchanged from the previous step**")
             if e.get("typed"):
                 marks.append(f"input {e['typed']}")
             A(f"| `{ff.tc(e['t'])}` | {detail} | {ops}"

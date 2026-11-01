@@ -225,9 +225,16 @@ def cmd_scout(a) -> int:
     srv = _watch(a, s, adb)
     walk = s.read("walk")
     evs = T.run(adb, s, walk, recorder=None, settle=a.settle)
+    for ev in evs:
+        if ev.get("hash"):
+            step = walk["steps"][ev["i"]]
+            step["verify"] = True
+            step["expect_hash"] = ev["hash"]
+    s.write("walk", walk)
     _linger(a, srv)
     stills = sorted(p.name for p in s.stills.glob("*.png"))
-    print(f"scouted {len(evs)} steps, {len(stills)} stills")
+    print(f"scouted {len(evs)} steps, {len(stills)} stills; "
+          f"calibrated {sum(1 for e in evs if e.get('hash'))} of them against this pass")
     return 0
 
 

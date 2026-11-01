@@ -121,15 +121,15 @@ def run(adb, session, walk: dict, recorder=None, size=None,
             if len(events) > 1 and events[-2]["focus"] == ev["focus"]:
                 ev["stuck"] = ev["focus"]
 
-    quiet = [i for i in range(1, len(events))
-             if events[i].get("hash") and events[i]["hash"] == events[i - 1]["hash"]]
-    for i in quiet:
-        events[i]["no_motion"] = True
-    if len(quiet) >= 2:
-        print(f"NO-MOTION: {len(quiet)} steps in a row left the screen identical "
-              f"(steps {quiet[0] + 1}-{quiet[-1] + 1} of {len(steps)}). The walk is not "
-              "advancing, so the captions burned in for those seconds describe screens "
-              "the recording never shows.")
+    off = [ev["i"] for ev in events if ev.get("mismatch")]
+    if off:
+        runs = sum(1 for a, b in zip(off, off[1:]) if a + 1 == b)
+        print(f"CALIBRATION: {len(off)} of {len(steps)} steps did not reach the screen "
+              f"scouted for them (steps {', '.join(str(i) for i in off[:8])}"
+              + (f"; {runs} of those are consecutive, so the flow diverged there"
+                 if runs else "")
+              + "). Scrub those seconds before shipping - the burned-in captions "
+              "describe screens the recording never shows.")
 
     stalled = [ev for ev in events if ev.get("stuck")]
     if stalled:

@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .env import find_font
 
 TINTS = ["#ff3b30", "#ffcc00", "#34c759", "#5ac8fa", "#af52de", "#ff9500"]
+HASH_BITS = 32 * 32  # ahash's bit width; a 16x16 grid cannot tell two white screens apart
 
 
 def _font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -17,7 +18,7 @@ def _font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
-def ahash(path: Path | str, size: int = 16) -> int:
+def ahash(path: Path | str, size: int = 32) -> int:
     with Image.open(path) as opened:
         px = opened.convert("L").resize((size, size), Image.BILINEAR).tobytes()
     mean = sum(px) / len(px)
@@ -28,8 +29,8 @@ def ahash(path: Path | str, size: int = 16) -> int:
 
 
 def differs(a: int, b: int, threshold: float = 0.18) -> bool:
-    """True when two hashes are different screens (>= threshold of 256 bits differ)."""
-    return bin(a ^ b).count("1") / 256.0 > threshold
+    """True when two hashes are different screens (>= threshold of the bits differ)."""
+    return bin(a ^ b).count("1") / HASH_BITS > threshold
 
 
 def annotate(src: Path | str, out: Path, rects: list[dict], title: str = "") -> Path:
