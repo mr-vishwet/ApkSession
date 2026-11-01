@@ -207,6 +207,9 @@ def session_view(root: Path) -> dict:
                       "frac": [frac.get("x", 0), frac.get("y", 0),
                                frac.get("w", 0), frac.get("h", 0)]})
     arts = []
+    steps = [{"i": e.get("i"), "t": e.get("t"), "screen": e.get("screen") or "",
+              "label": e.get("label") or "", "mismatch": bool(e.get("mismatch")),
+              "stuck": e.get("stuck") or ""} for e in tl.get("events", [])]
     run = read_json(s.root / "inputs" / "run.json", {})
     if run.get("stages") and not RUNS.get(s.root.name, {}).get("alive"):
         for h in run["stages"]:  # a stage left "running" means the runner died mid-stage
@@ -231,6 +234,7 @@ def session_view(root: Path) -> dict:
         "step": status, "duration": dur, "offset": tl.get("offset"),
         "align": tl.get("align", {}), "chapters": tl.get("chapters", []),
         "boxes": boxes, "screens": tl.get("screens", {}), "run": run,
+        "steps": steps,
         "artifacts": arts, "progress": prog, "percent": pct,
         "proof": (rend.get("proof") or {}).get("tally", {}),
         "video_ready": bool((rend.get("video") or "")) and Path(rend.get("video", "")).exists(),
@@ -300,6 +304,7 @@ video{width:100%;max-height:52vh;background:#000;border-radius:8px}
 <video id=vid controls playsinline></video><div id=vinfo></div></div>
 </div><div>
 <div class=stage><h2>Chapters</h2><div class=rail id=rail></div></div>
+<div class=stage><h2>Steps</h2><div id=steps></div></div>
 <div class=stage><h2>Artifacts</h2><div id=arts></div></div>
 <div class=stage><h2>Masking</h2><div id=mask></div></div>
 <div class=stage><h2>Mask picker</h2>
@@ -361,6 +366,15 @@ async function tick(){let j;
  const cur=s.i!==undefined?j.chapters.findIndex(c=>s.chapter&&c.module===s.chapter):-1;
  document.getElementById('rail').innerHTML=j.chapters.map((c,i)=>
   `<div class="ch ${i===cur?'on':''}"><span>${ff(c.t0)}-${ff(c.t1)}</span><b>${c.module}</b><span>${c.opened_with||''}</span></div>`).join('')||'<pre>no timeline yet</pre>';
+ const stp=j.steps||[],miss=stp.filter(e=>e.mismatch||e.stuck).length;
+ document.getElementById('steps').innerHTML=stp.length?
+  `<div class=n>${stp.length} step(s) replayed, ${miss} did not land on the screen scouted for them</div>`+
+  stp.map(e=>`<div class=row><span class=n>${ff(e.t||0)} ${(e.screen||'-')}</span>`+
+   `<span style=flex:1;margin-left:8px>${ht(e.label||'')}</span>`+
+   (e.mismatch?'<span class="pill bad">missed screen</span>'
+    :e.stuck?'<span class="pill bad">dialog in front</span>'
+    :'<span class="pill ok">ok</span>')+'</div>').join('')
+  :'<pre>no walk recorded yet</pre>';
  document.getElementById('arts').innerHTML='<table>'+j.artifacts.map(a=>
   `<tr><td>${a.masked?`<a href="${u('/f/'+a.rel+'&dl=1')}">${a.name}</a>`:a.name}</td>`
   +`<td>${a.what}</td><td>${kb(a.bytes)}</td>`

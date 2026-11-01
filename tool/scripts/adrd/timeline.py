@@ -129,7 +129,11 @@ def run(adb, session, walk: dict, recorder=None, size=None,
               + (f"; {runs} of those are consecutive, so the flow diverged there"
                  if runs else "")
               + "). Scrub those seconds before shipping - the burned-in captions "
-              "describe screens the recording never shows.")
+              "describe screens the recording never shows."
+              + (" Step 0 already missed, so this pass did not start from the state the "
+                 "scout recorded: run `launch --clear` first and give the cold start "
+                 "longer to settle."
+                 if off[0] == 0 else ""))
 
     stalled = [ev for ev in events if ev.get("stuck")]
     if stalled:

@@ -191,6 +191,25 @@ def test_a_system_dialog_that_survives_a_step_is_reported(tmp_path, capsys):
     assert "STALLED" not in capsys.readouterr().out
 
 
+def test_the_page_lists_each_step_with_the_screen_it_was_supposed_to_reach(tmp_path):
+    """A round that silently stopped advancing is the failure this whole loop exists to
+    catch, and a chapter list cannot show it - the verdict belongs per step."""
+    root = tmp_path / "sessions" / "delta"
+    root.mkdir(parents=True)
+    (root / "state.json").write_text(json.dumps({"app": "delta"}))
+    (root / "timeline.json").write_text(json.dumps(
+        {"duration": 30.0, "chapters": [], "events": [
+            {"i": 0, "t": 1.0, "screen": "home", "label": "open"},
+            {"i": 1, "t": 9.0, "screen": "form", "label": "type postcode", "mismatch": True},
+            {"i": 2, "t": 20.0, "screen": "form", "label": "search",
+             "stuck": "com.android.systemui/.anr.AnrDialog"}]}))
+    steps = watch.session_view(root)["steps"]
+    assert [s["label"] for s in steps] == ["open", "type postcode", "search"]
+    assert [s["mismatch"] for s in steps] == [False, True, False]
+    assert steps[2]["stuck"].startswith("com.android.systemui")
+    assert [s["screen"] for s in steps] == ["home", "form", "form"]
+
+
 def test_a_step_that_misses_its_calibrated_screen_is_counted(tmp_path, capsys):
     """The scout pass is the calibration: it records what each step is supposed to land
     on, and the take compares. Without that write-back a walk that never left the
@@ -245,6 +264,9 @@ def test_a_step_that_misses_its_calibrated_screen_is_counted(tmp_path, capsys):
     assert [e.get("mismatch") for e in events] == [True] * 3
     out = capsys.readouterr().out
     assert "CALIBRATION: 3 of 3 steps" in out and "2 of those are consecutive" in out
+    # step 0 missing means the pass did not start from the scouted state, which is the
+    # single way this fires on a healthy device
+    assert "launch --clear" in out
 
 
 def test_the_runs_own_records_are_never_mistaken_for_the_brief(server):
