@@ -210,6 +210,55 @@ def test_the_page_lists_each_step_with_the_screen_it_was_supposed_to_reach(tmp_p
     assert [s["screen"] for s in steps] == ["home", "form", "form"]
 
 
+def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkeypatch):
+    """The bookmarkable URL is the one requirement that cannot be shown with a quick
+    tunnel, so drive the real named-tunnel path against a stub cloudflared: the create,
+    route dns and run sequence, the ingress file, and - the point of all this - that a
+    second start reuses the same hostname instead of minting a new one."""
+    import os
+
+    cf = tmp_path / ".cloudflared"
+    cf.mkdir()
+    monkeypatch.setattr(watch, "cf_dir", lambda: cf)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    calls = tmp_path / "calls.txt"
+    stub = tmp_path / "cloudflared"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {calls}\n'
+        f'if [ "$1 $2" = "tunnel create" ]; then '
+        f'printf \'{{"tunnel_id":"abc-123"}}\' > {cf}/$3.json; fi\n'
+        'if [ "$3" = "--config" ]; then sleep 30; fi\n'
+        "exit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    url = watch.named_tunnel("http://127.0.0.1:8734", sessions / "tunnel.log",
+                            sessions, "adrd.example.com")
+    assert url == "https://adrd.example.com"
+    cfg = (sessions / "adrd.yml").read_text()
+    assert "tunnel: abc-123" in cfg and "hostname: adrd.example.com" in cfg
+    assert "service: http://127.0.0.1:8734" in cfg
+    assert f"credentials-file: {cf / 'adrd.json'}" in cfg
+    logged = (tmp_path / "calls.txt").read_text()
+    assert "tunnel create adrd" in logged and "tunnel route dns adrd adrd.example.com" in logged
+
+    rec = json.loads(watch.tunnel_record(sessions).read_text())
+    assert rec["named"] is True and rec["url"] == "https://adrd.example.com"
+    os.kill(rec["pid"], 15)
+
+    again = watch.named_tunnel("http://127.0.0.1:9000", sessions / "tunnel.log",
+                              sessions, "adrd.example.com")
+    assert again == url, "the bookmarked host must survive a restart"
+    after = (tmp_path / "calls.txt").read_text()
+    assert after.count("tunnel create") == 1, "credential reused, not recreated"
+    assert after.count("route dns") == 1, "DNS routed once, not on every start"
+    assert "service: http://127.0.0.1:9000" in (sessions / "adrd.yml").read_text(), \
+        "the ingress file follows the port this process is actually serving"
+    os.kill(json.loads(watch.tunnel_record(sessions).read_text())["pid"], 15)
+
+
 def test_a_step_that_misses_its_calibrated_screen_is_counted(tmp_path, capsys):
     """The scout pass is the calibration: it records what each step is supposed to land
     on, and the take compares. Without that write-back a walk that never left the

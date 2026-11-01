@@ -96,6 +96,15 @@ class Probe:
     fix: str = ""
 
 
+def cf_dir() -> Path:
+    """Where cloudflared keeps the account cert and per-tunnel credentials."""
+    return Path.home() / ".cloudflared"
+
+
+def cf_cert() -> Path:
+    return cf_dir() / "cert.pem"
+
+
 def doctor() -> list[Probe]:
     probes: list[Probe] = []
 
@@ -151,6 +160,15 @@ def doctor() -> list[Probe]:
     wk = shutil.which("wkhtmltopdf")
     probes.append(Probe("wkhtmltopdf", wk is not None, str(wk) if wk else "not found",
                         "only needed for the A4 report; SESSION_DOC.md is complete without it"))
+
+    cfl = shutil.which("cloudflared")
+    signed = cfl is not None and cf_cert().exists()
+    probes.append(Probe("cloudflared", cfl is not None, str(cfl) if cfl else "not found",
+                        "brew install cloudflared"))
+    probes.append(Probe("cloudflare login", signed,
+                        str(cf_cert()) if signed else "no cert - quick tunnels only",
+                        "adrd tunnel --session DIR --login   (once, in the browser) - "
+                        "without it a fixed hostname cannot be bound"))
 
     serials = list_serials() if adb else []
     emu = [s for s in serials if "-emu" in s or s.startswith("emulator-")]

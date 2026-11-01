@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import ingest as IN
 from . import uploads as UP
+from .env import cf_cert, cf_dir
 from .session import Session
 
 BOUNDARY = "adrdframe"
@@ -1031,17 +1032,13 @@ def tunnel_status(sessions_dir: Path, port: int | None = None) -> str | None:
     return d["url"]
 
 
-def cf_cert() -> Path:
-    return Path.home() / ".cloudflared" / "cert.pem"
-
-
 def tunnel_config(sessions_dir: Path, name: str, uuid: str, hostname: str,
                   local_url: str) -> Path:
     """A named tunnel needs an ingress file; --url only exists for quick tunnels."""
     p = sessions_dir / f"{name}.yml"
     p.write_text(
         f"tunnel: {uuid}\n"
-        f"credentials-file: {Path.home() / '.cloudflared' / (name + '.json')}\n"
+        f"credentials-file: {cf_dir() / (name + '.json')}\n"
         f"ingress:\n"
         f"  - hostname: {hostname}\n"
         f"    service: {local_url}\n"
@@ -1053,7 +1050,7 @@ def named_tunnel(local_url: str, log: Path, sessions_dir: Path, hostname: str) -
     """A fixed hostname that survives restarts, so the URL you bookmark is the URL you
     open tomorrow. Needs one `cloudflared tunnel login` and a zone in that account."""
     name = re.sub(r"[^a-z0-9-]", "-", hostname.split(".")[0])[:40] or "adrd"
-    cred = Path.home() / ".cloudflared" / f"{name}.json"
+    cred = cf_dir() / f"{name}.json"
     with log.open("a") as fh:
         if not cred.exists():
             cp = subprocess.run(["cloudflared", "tunnel", "create", name],
