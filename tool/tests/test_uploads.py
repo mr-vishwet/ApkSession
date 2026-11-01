@@ -210,6 +210,58 @@ def test_the_page_lists_each_step_with_the_screen_it_was_supposed_to_reach(tmp_p
     assert [s["screen"] for s in steps] == ["home", "form", "form"]
 
 
+def test_editing_a_box_marks_the_video_stale_and_offers_the_repair(server, monkeypatch):
+    """Half the round trips this session cost were "I changed a box, is the page showing
+    the old video?" - nothing said. So staleness is computed from the files and the page
+    gets one button that re-runs only the output stages."""
+    import os
+
+    port, alpha = server
+    (alpha / "render").mkdir()
+    vid = alpha / "render" / "demo_debranded.mp4"
+    vid.write_bytes(b"fake-video")
+    (alpha / "render.json").write_text(json.dumps({"video": str(vid)}))
+    (alpha / "branding.json").write_text(json.dumps({"entries": []}))
+    (alpha / "timeline.json").write_text(json.dumps(
+        {"size": [1080, 2400], "duration": 10.0, "chapters": [], "events": []}))
+    now = time.time()
+    os.utime(vid, (now - 100, now - 100))
+    os.utime(alpha / "branding.json", (now, now))
+
+    code, st = req(port, "GET", f"/s/alpha/state?t={TOKEN}")
+    assert st["stale"] is True, "boxes are newer than the rendered video"
+
+    monkeypatch.setattr(watch.subprocess, "run",
+                        lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": "",
+                                                          "stderr": ""})())
+    watch.RUNS["alpha"] = {"alive": True}
+    code, out = req(port, "POST", f"/s/alpha/api/render?t={TOKEN}")
+    assert code == 409, out
+    watch.RUNS.clear()
+
+    code, out = req(port, "POST", f"/s/alpha/api/render?t={TOKEN}")
+    assert code == 202 and out["stages"] == ["render", "sweep", "doc", "export"], out
+    assert out["export_includes_raw"] is False, "a repair must not start shipping the raw capture"
+    run = None
+    for _ in range(80):
+        if (alpha / "inputs" / "run.json").is_file():
+            run = json.loads((alpha / "inputs" / "run.json").read_text())
+            if all(h["state"] != "waiting" for h in run["stages"]):
+                break
+        time.sleep(0.05)
+    assert run, "the re-render never wrote its stage record"
+    assert [h["name"] for h in run["stages"]] == ["render", "sweep", "doc", "export"]
+    assert all(h["state"] == "ok" for h in run["stages"]), run
+
+    os.utime(vid, (now + 5, now + 5))
+    code, st = req(port, "GET", f"/s/alpha/state?t={TOKEN}")
+    assert st["stale"] is False, "the video is back in step with the boxes"
+
+    (alpha / "timeline.json").unlink()
+    code, out = req(port, "POST", f"/s/alpha/api/render?t={TOKEN}")
+    assert code == 400, out
+
+
 def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkeypatch):
     """The bookmarkable URL is the one requirement that cannot be shown with a quick
     tunnel, so drive the real named-tunnel path against a stub cloudflared: the create,
@@ -389,7 +441,7 @@ def test_run_starts_and_refuses_a_second_one(server, monkeypatch):
     release = threading.Event()
     started = threading.Event()
 
-    def fake_stages(root, name, apk, raw=False):
+    def fake_stages(root, name, apk, raw=False, only=None):
         started.set()
         release.wait(10)
 
@@ -418,7 +470,7 @@ def test_a_crashing_stage_runner_frees_the_session_for_the_next_run(server, monk
     port, alpha = server
     upload(port, "apk", "app.apk", APK)
 
-    def crash(root, name, apk, raw=False):
+    def crash(root, name, apk, raw=False, only=None):
         raise RuntimeError("stage runner died")
 
     monkeypatch.setattr(watch, "_run_stages", crash)

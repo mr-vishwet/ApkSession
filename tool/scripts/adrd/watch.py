@@ -46,20 +46,23 @@ def _adrd_path() -> str:
     return _ADRD_PATH
 
 
-def _run_guarded(root: Path, name: str, apk: Path, raw: bool = False) -> None:
+def _run_guarded(root: Path, name: str, apk: Path, raw: bool = False,
+                 only: tuple[str, ...] | None = None) -> None:
     """Whatever happens to the stages, the session must stop being marked as running -
     otherwise one failed launch locks that session out of every later run."""
     try:
-        _run_stages(root, name, apk, raw)
+        _run_stages(root, name, apk, raw, only)
     finally:
         with RUN_LOCK:
             RUNS.pop(name, None)
 
 
-def _run_stages(root: Path, name: str, apk: Path, raw: bool = False) -> None:
+def _run_stages(root: Path, name: str, apk: Path, raw: bool = False,
+                only: tuple[str, ...] | None = None) -> None:
     """Run launch -> take -> render -> sweep -> doc -> export, one stage at a
     time, writing each stage to status.json and appending output to
-    inputs/run.log so the dashboard can show progress."""
+    inputs/run.log so the dashboard can show progress. `only` narrows the plan for a
+    re-render after a box edit, which must not reinstall the app or re-record."""
     log = root / "inputs" / "run.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     py = sys.executable
@@ -76,6 +79,8 @@ def _run_stages(root: Path, name: str, apk: Path, raw: bool = False) -> None:
         ("export", [py, adrd, "export", "--session", str(root),
                     "--yes" if raw else "--no-raw"]),
     ]
+    if only:
+        stages = [s for s in stages if s[0] in only]
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     hist = [{"name": n, "state": "waiting", "seconds": None} for n, _ in stages]
     rec = root / "inputs" / "run.json"
@@ -222,6 +227,11 @@ def session_view(root: Path) -> dict:
             arts.append({"name": p.name, "what": what, "rel": str(p.relative_to(s.root)),
                          "bytes": p.stat().st_size, "masked": "unmasked" not in what})
     prog = parse_progress(s.render / "progress.txt") if (s.render / "progress.txt").exists() else {}
+    stale = False
+    if rend.get("video") and Path(rend["video"]).exists():
+        out_t = Path(rend["video"]).stat().st_mtime
+        stale = any(p.exists() and p.stat().st_mtime > out_t
+                    for p in (s.path("branding"), s.path("timeline"), s.path("walk")))
     dur = tl.get("duration") or st.get("duration")
     pct = None
     if prog.get("seconds") is not None and dur:
@@ -235,7 +245,7 @@ def session_view(root: Path) -> dict:
         "step": status, "duration": dur, "offset": tl.get("offset"),
         "align": tl.get("align", {}), "chapters": tl.get("chapters", []),
         "boxes": boxes, "screens": tl.get("screens", {}), "run": run,
-        "steps": steps,
+        "steps": steps, "stale": stale,
         "artifacts": arts, "progress": prog, "percent": pct,
         "proof": (rend.get("proof") or {}).get("tally", {}),
         "video_ready": bool((rend.get("video") or "")) and Path(rend.get("video", "")).exists(),
@@ -285,7 +295,7 @@ video{width:100%;max-height:52vh;background:#000;border-radius:8px}
 .warn{background:#2a1e0b;border:1px solid #5c4313;border-radius:8px;padding:10px 12px;color:#ffcc80;font-size:13px}
 </style>
 <header><h1 id=t>loading</h1><span id=d></span><span id=dev></span>
-<span class=pill id=stage></span><span style="flex:1"></span>
+<span class=pill id=stage></span><button id=reRender style=display:none>Re-render</button><span style="flex:1"></span>
 <label class=row style=margin:0><input type=checkbox id=mt checked>mask preview</label>
 <button id=ex>Export all</button><a href="/">all sessions</a></header>
 <main><div>
@@ -351,7 +361,17 @@ async function tick(){let j;
  document.getElementById('t').textContent=j.app||j.session;
  document.getElementById('d').textContent=(j.package||'')+(j.duration?' - '+Math.round(j.duration)+'s':'');
  document.getElementById('dev').textContent=j.device?`${j.device} ${j.size?j.size.join('x'):''}`:'no device';
- const st=document.getElementById('stage');st.textContent=j.stage;st.className='pill '+(j.stage.includes('shar')?'ok':'warn');
+ const st=document.getElementById('stage');
+ st.textContent=j.stale?'re-render needed':j.stage;
+ st.className='pill '+(j.stale?'bad':(j.stage.includes('shar')?'ok':'warn'));
+ const rb=document.getElementById('reRender');
+ rb.style.display=j.stale?'inline-block':'none';
+ rb.title='the boxes, the walk or the timings changed after this video was rendered';
+ if(j.stale&&!rb.dataset.wired){rb.dataset.wired=1;
+  rb.onclick=()=>{rb.disabled=1;post('/api/render')
+   .then(x=>{note('re-rendering: '+x.stages.join(' then '),1);loadInputs();})
+   .catch(e=>note('re-render failed: '+String(e).slice(0,120)))
+   .finally(()=>{rb.disabled=0;});};}
  const s=j.step||{};
  const rs=(j.run&&j.run.stages)||[];
  const pill=h=>`<span class="pill ${h.state==='ok'?'ok':h.state==='running'?'warn'
@@ -691,6 +711,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
         if what == "run":
             return self._run(root, name, q)
+        if what == "render":
+            return self._render(root, name)
         if what == "box":
             return self._box(root, q)
         return self._send(404, b"not found", "text/plain")
@@ -808,19 +830,32 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
 
     def _run(self, root: Path, name: str, q: dict) -> None:
-        apk = root / "inputs" / "app.apk"
-        if not apk.is_file():
-            return self._send(400, json.dumps({"error": "upload an .apk first"}).encode(),
-                              "application/json")
+        if not (root / "inputs" / "app.apk").is_file():
+            return self._json(400, {"error": "upload an .apk first"})
         raw = q.get("raw", [""])[0] in ("1", "yes", "true")
+        self._start(root, name, raw)
+
+    def _render(self, root: Path, name: str) -> None:
+        """Re-run the output stages after a box or caption edit. Without this the page
+        kept serving a video that no longer matched the boxes listed beside it."""
+        if not (root / "timeline.json").is_file():
+            return self._json(400, {"error": "nothing recorded yet - run the round first"})
+        self._start(root, name, False, ("render", "sweep", "doc", "export"))
+
+    def _start(self, root: Path, name: str, raw: bool = False,
+               only: tuple[str, ...] | None = None) -> None:
         with RUN_LOCK:
             if RUNS.get(name, {}).get("alive"):
-                return self._send(409, json.dumps({"error": "a run is already going"}).encode(),
-                                  "application/json")
+                return self._json(409, {"error": "a run is already going"})
             RUNS[name] = {"alive": True}
-        threading.Thread(target=_run_guarded, args=(root, name, apk, raw), daemon=True).start()
-        self._send(202, json.dumps({"ok": True, "log": "inputs/run.log",
-                                    "export_includes_raw": raw}).encode(), "application/json")
+        threading.Thread(target=_run_guarded,
+                         args=(root, name, root / "inputs" / "app.apk", raw, only),
+                         daemon=True).start()
+        self._json(202, {"ok": True, "log": "inputs/run.log",
+                         "stages": list(only) if only else ["launch", "take", "brand",
+                                                            "render", "sweep", "doc",
+                                                            "export"],
+                         "export_includes_raw": raw})
 
     def _inputs(self, root: Path) -> None:
         cases = read_json(root / "cases.json", None)
