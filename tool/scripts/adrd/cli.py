@@ -354,6 +354,22 @@ def cmd_brand(a) -> int:
         s.write("branding", b)
         print(f"removed {len(idxs)} of {len(b['entries'])} left")
         return 0
+    if a.what == "set":
+        # A box drawn on the right pixels but filed under the wrong screen name is
+        # invisible for its whole window and blind for every other one; re-scoping it
+        # keeps the geometry that was already correct.
+        if len(a.index) != 1 or not a.screen:
+            print("brand set --index i --screen NAME|global", file=sys.stderr)
+            return 2
+        i = int(a.index[0])
+        if not 0 <= i < len(b["entries"]):
+            print(f"no box {i} - {len(b['entries'])} in this session", file=sys.stderr)
+            return 2
+        e = b["entries"][i]
+        e["scope"] = "global" if a.screen == "global" else f"screen:{a.screen}"
+        s.write("branding", b)
+        print(f"{e['label']} -> {e['scope']}")
+        return 0
     if a.what == "add":
         if not (a.rect or a.frac):
             print("need --rect x,y,w,h or --frac x,y,w,h", file=sys.stderr)
@@ -718,7 +734,7 @@ def build_parser() -> argparse.ArgumentParser:
     cc.set_defaults(fn=cmd_concat)
 
     b = sub.add_parser("brand", help="add/list brand boxes")
-    b.add_argument("what", choices=["add", "list", "rm", "preset"])
+    b.add_argument("what", choices=["add", "list", "rm", "set", "preset"])
     b.add_argument("--session", required=True)
     b.add_argument("--screen", help="screen still name this box belongs to")
     b.add_argument("--rect", help="x,y,w,h in the still's pixels")

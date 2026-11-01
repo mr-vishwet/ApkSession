@@ -205,7 +205,8 @@ def session_view(root: Path) -> dict:
             "recorded" if tl else "calibrating"),
         "step": status, "duration": dur, "offset": tl.get("offset"),
         "align": tl.get("align", {}), "chapters": tl.get("chapters", []),
-        "boxes": boxes, "artifacts": arts, "progress": prog, "percent": pct,
+        "boxes": boxes, "screens": tl.get("screens", {}),
+        "artifacts": arts, "progress": prog, "percent": pct,
         "proof": (rend.get("proof") or {}).get("tally", {}),
         "video_ready": bool((rend.get("video") or "")) and Path(rend.get("video", "")).exists(),
         "updated": time.strftime("%H:%M:%S"),
@@ -346,8 +347,19 @@ async function tick(){let j;
    (l.length>400?`<span class=n>...${l.length-400} more - use download all</span>`:'')})}
  const p=j.proof||{},bad=Object.keys(p).filter(k=>k.startsWith('unchanged'));
  BOXES=j.boxes;pkOld();
- document.getElementById('mask').innerHTML=`<div>${j.boxes.length} box(es)</div>`+
-  j.boxes.map(b=>`<div class=row style=margin-top:4px><span class=n>${ht(b.scope.replace('screen:',''))} - ${ht(b.label)} (${ht(b.mode)})</span>`+
+ const scr=j.screens||{},sn=['global'].concat(Object.keys(scr));
+ const win=b=>{if(b.scope==='global')return 'the whole film';
+  const w=scr[b.scope.replace('screen:','')]||[];
+  return w.length?w.map(x=>`${Math.round(x[0])}-${Math.round(x[1])}s`).join(' ')
+   :'no window - this box masks nothing'};
+ const mkEl=document.getElementById('mask');
+ // this panel repaints every 1.5s; rebuilding it under an open dropdown loses the
+ // choice. Buttons keep their focus after a click, so only a select holds the panel still.
+ const ae=document.activeElement;
+ if(!(ae&&ae.tagName==='SELECT'&&mkEl.contains(ae)))
+  mkEl.innerHTML=`<div>${j.boxes.length} box(es)</div>`+
+  j.boxes.map(b=>`<div class=row style=margin-top:4px><span class=n>${ht(b.label)} (${ht(b.mode)}) ${ht(win(b))}</span>`+
+   `<select data-sc=${b.i} style=margin-left:6px>`+sn.map(n=>`<option${n===b.scope.replace('screen:','')?' selected':''}>${n}</option>`).join('')+`</select>`+
    `<button data-rm=${b.i} style="margin-left:auto;background:#1b2230;color:#e6e9ef;border:1px solid #2b3648">remove</button></div>`).join('')+
   Object.entries(p).map(([k,v])=>`<span class="pill ${k.startsWith('strongly')?'ok':k.startsWith('unchanged')?'bad':''}">${v} ${k}</span>`).join(' ')+
   (bad.length?`<div class=warn style=margin-top:8px>${bad.length} box covers nothing - fix its screen name or rect</div>`:'')+
@@ -402,6 +414,10 @@ if(mk)mk.onclick=e=>{const b=e.target.closest&&e.target.closest('button');if(!b|
  b.disabled=1;fetch(u('/api/box',{op:'rm',i:b.dataset.rm}),{method:'POST'}).then(r=>r.json())
  .then(j=>{const n=document.getElementById('pkNote');if(n)n.textContent=j.error||('removed '+(j.label||'')+' - render again');tick();})
  .catch(()=>{b.disabled=0;});};
+if(mk)mk.onchange=e=>{const s=e.target.closest&&e.target.closest('select');if(!s)return;
+ fetch(u('/api/box',{op:'set',i:s.dataset.sc,screen:s.value}),{method:'POST'}).then(r=>r.json())
+ .then(j=>{const n=document.getElementById('pkNote');if(n)n.textContent=j.error||('box now on '+j.scope+' - render again');tick();})
+ .catch(()=>{tick();});};
 loadPick();setInterval(loadPick,20000);
 loadInputs();
 function ff(s){s=Math.max(0,s||0);return String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0')}
@@ -642,6 +658,8 @@ class Handler(BaseHTTPRequestHandler):
         the still the reviewer is actually looking at."""
         if q.get("op", [""])[0] == "rm":
             return self._box_rm(root, q)
+        if q.get("op", [""])[0] == "set":
+            return self._box_set(root, q)
         screen = q.get("screen", [""])[0]
         label = (q.get("label", ["brand mark"])[0] or "brand mark")[:60].replace("\n", " ")
         mode = q.get("mode", ["solid"])[0]
@@ -669,23 +687,51 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "screen": screen, "rect": [x, y, w, h],
                          "label": label, "mode": mode})
 
-    def _box_rm(self, root: Path, q: dict) -> None:
-        """A box that landed on the wrong band has to be removable from the page. Editing
-        branding.json by hand while a run is watching it was not workable."""
-        entries = (read_json(root / "branding.json", {}) or {}).get("entries", [])
+    def _brand(self, root: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, _adrd_path(), "brand", *args, "--session",
+                               str(root)], capture_output=True, text=True)
+
+    def _box_index(self, root: Path, q: dict) -> int | None:
+        """Validate ?i= against the boxes on disk, answering the request itself if it is
+        not a number or not one of them."""
+        n = len((read_json(root / "branding.json", {}) or {}).get("entries", []))
         try:
             i = int(q.get("i", [""])[0])
         except ValueError:
-            return self._json(400, {"error": "i must be a box index"})
-        if not 0 <= i < len(entries):
-            return self._json(400, {"error": f"no box {i} - {len(entries)} in the session"})
-        cp = subprocess.run([sys.executable, _adrd_path(), "brand", "rm", "--session", str(root),
-                             "--index", str(i)], capture_output=True, text=True)
+            self._json(400, {"error": "i must be a box index"})
+            return None
+        if not 0 <= i < n:
+            self._json(400, {"error": f"no box {i} - {n} in the session"})
+            return None
+        return i
+
+    def _box_rm(self, root: Path, q: dict) -> None:
+        """A box that landed on the wrong band has to be removable from the page. Editing
+        branding.json by hand while a run is watching it was not workable."""
+        i = self._box_index(root, q)
+        if i is None:
+            return
+        entries = (read_json(root / "branding.json", {}) or {}).get("entries", [])
+        cp = self._brand(root, "rm", "--index", str(i))
         if cp.returncode != 0:
             return self._json(500, {"error": (cp.stdout + cp.stderr).strip()[-300:]})
-        gone = entries[i]
-        self._json(200, {"ok": True, "removed": i, "label": gone.get("label", ""),
+        self._json(200, {"ok": True, "removed": i, "label": entries[i].get("label", ""),
                          "left": len(entries) - 1})
+
+    def _box_set(self, root: Path, q: dict) -> None:
+        """Move a box onto another screen's time window, keeping its geometry. Every leak
+        that survived a sweep in the last round was a correct box filed under a screen
+        name whose window did not cover the seconds it needed to."""
+        screen = q.get("screen", [""])[0]
+        if not re.fullmatch(r"global|[A-Za-z0-9_:-]{1,64}", screen):
+            return self._json(400, {"error": "unknown screen name"})
+        i = self._box_index(root, q)
+        if i is None:
+            return
+        cp = self._brand(root, "set", "--index", str(i), "--screen", screen)
+        if cp.returncode != 0:
+            return self._json(500, {"error": (cp.stdout + cp.stderr).strip()[-300:]})
+        self._json(200, {"ok": True, "i": i, "scope": screen})
 
     def _picklist(self, root: Path) -> None:
         tl = read_json(root / "timeline.json", {}) or {}

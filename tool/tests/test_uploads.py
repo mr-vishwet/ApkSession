@@ -366,6 +366,38 @@ def test_a_box_drawn_on_the_page_can_be_removed_from_the_page(server):
         assert code == 400, (bad, out)
 
 
+def test_a_box_can_be_moved_onto_another_screens_time_window(server):
+    """Every leak that survived a sweep last round was a box drawn on the right pixels
+    but filed under a screen whose window did not cover the seconds it needed. The page
+    has to let that one field change without redrawing the box."""
+    port, alpha = server
+    (alpha / "timeline.json").write_text(json.dumps(
+        {"size": [1080, 2400], "events": [],
+         "screens": {"home": [[0.0, 12.0]], "category": [[90.0, 140.0]]}}))
+    code, out = req(port, "POST",
+                    f"/s/alpha/api/box?t={TOKEN}&screen=home&x=290&y=160&w=520&h=110"
+                    f"&label=logo%20tiles&mode=solid")
+    assert code == 200, out
+
+    code, st = req(port, "GET", f"/s/alpha/state?t={TOKEN}")
+    assert st["screens"]["category"] == [[90.0, 140.0]]
+    assert st["boxes"][0]["scope"] == "screen:home"
+
+    code, out = req(port, "POST", f"/s/alpha/api/box?t={TOKEN}&op=set&i=0&screen=category")
+    assert code == 200 and out["scope"] == "category", out
+    entries = json.loads((alpha / "branding.json").read_text())["entries"]
+    assert entries[0]["scope"] == "screen:category"
+    assert entries[0]["rect"] == {"x": 290, "y": 160, "w": 520, "h": 110}, "geometry kept"
+
+    code, out = req(port, "POST", f"/s/alpha/api/box?t={TOKEN}&op=set&i=0&screen=global")
+    assert code == 200, out
+    assert json.loads((alpha / "branding.json").read_text())["entries"][0]["scope"] == "global"
+
+    for bad in ("screen=../../etc", "screen=", "i=9&screen=home", "i=x&screen=home"):
+        code, out = req(port, "POST", f"/s/alpha/api/box?t={TOKEN}&op=set&{bad}")
+        assert code == 400, (bad, out)
+
+
 def test_a_preset_repeated_does_not_stack_boxes():
     """The run stage calls `brand preset` every time, so a second pass used to append a
     second copy of all five boxes over the same pixels - the render still looked masked
