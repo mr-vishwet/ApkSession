@@ -35,6 +35,10 @@ class UploadError(ValueError):
         self.status = status
 
 
+RUN_FILES = ("app.apk", "run.log", "run.json")
+# the run writes these into inputs/ itself; a brief must never be confused with them
+
+
 def spec(kind: str) -> dict:
     try:
         return KINDS[kind]
@@ -48,6 +52,8 @@ def safe_name(kind: str, name: str) -> str:
     base = (name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
     if not base or ".." in base or "/" in base:
         raise UploadError("filename must be a plain basename")
+    if not _SAFE.match(base):
+        raise UploadError("filename may only use letters, digits, space, dot, dash, underscore")
     if not _SAFE.match(base):
         raise UploadError("filename may only use letters, digits, space, dot, dash, underscore")
     suffix = Path(base).suffix.lower()
@@ -102,12 +108,15 @@ def stream_to(root: Path, kind: str, name: str, rfile, length: int) -> dict:
 
 
 def _brief_files(root: Path) -> list[Path]:
-    """Anything in inputs/ that is not the APK and not a half-written temp."""
+    """Anything in inputs/ that is not the APK, not one of the run's own records, and not
+    a half-written temp. The run writes its log and stage record next to the brief, and
+    run.log sorts after every real filename - counting it as the brief made the page
+    report the log as the instructions and offered to build cases out of it."""
     d = root / "inputs"
     if not d.is_dir():
         return []
     return sorted(p for p in d.iterdir()
-                  if p.is_file() and p.name != "app.apk" and ".part." not in p.name)
+                  if p.is_file() and p.name not in RUN_FILES and ".part." not in p.name)
 
 
 def listed(root: Path) -> dict:

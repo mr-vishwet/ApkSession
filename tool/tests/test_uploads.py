@@ -139,6 +139,23 @@ def test_routes_require_the_token(server):
 
 # ---- cases: from the brief when there is one, from the flow map when there is not --
 
+def test_the_runs_own_records_are_never_mistaken_for_the_brief(server):
+    """launch/take/render write run.log and run.json into inputs/, next to the brief.
+    They sort after every real filename, so after one run the page named the log as the
+    instructions and Build cases would have parsed stage output for test steps."""
+    port, alpha = server
+    upload(port, "apk", "app.apk", APK)
+    upload(port, "brief", "find-support-cases.md", BRIEF)
+    (alpha / "inputs" / "run.log").write_text("== launch ==\nexit=0\n== take ==\nexit=0\n")
+    (alpha / "inputs" / "run.json").write_text(json.dumps({"stages": []}))
+
+    code, out = req(port, "GET", f"/s/alpha/api/inputs?t={TOKEN}")
+    assert code == 200 and out["brief"]["name"] == "find-support-cases.md", out
+
+    code, cases = req(port, "POST", f"/s/alpha/api/cases?t={TOKEN}")
+    assert code == 200 and cases["origin"] == "brief" and cases["count"] == 3, cases
+
+
 def test_brief_produces_numbered_cases(server):
     port, alpha = server
     upload(port, "apk", "app.apk", APK)
