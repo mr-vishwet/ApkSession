@@ -67,6 +67,8 @@ def readme(session, tl: dict, st: dict, brief: str, include_raw: bool) -> str:
     ]
     if include_raw:
         L.append("  video/recording_UNMASKED.mp4   UNMASKED - internal use only, not for sharing")
+    if session.path("report").exists():
+        L.append("  SESSION_DOC.pdf             the same report laid out for print")
     L += [
         "  manifest.json              sha256 of every file in this bundle",
         "",
@@ -125,6 +127,7 @@ def build(session, brief_text: str = "", brief_file: str | None = None,
     keep(session.path("final"), "video/demo_debranded.mp4")
     keep(session.path("vtt"), "video/chapters.vtt")
     keep(session.path("doc"), "SESSION_DOC.md")
+    keep(session.path("report"), "SESSION_DOC.pdf")
     keep(session.path("flow").with_name("FLOW_MAP.md"), "FLOW_MAP.md")
     if include_raw:
         keep(session.path("recording"), "video/recording_UNMASKED.mp4")

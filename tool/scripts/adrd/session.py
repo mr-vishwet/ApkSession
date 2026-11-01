@@ -19,6 +19,7 @@ FILES = {
     "final": "render/demo_debranded.mp4",
     "vtt": "render/demo_chapters.vtt",
     "doc": "render/SESSION_DOC.md",
+    "report": "render/SESSION_DOC.pdf",
     "sheet": "render/screens_contact_sheet.png",
     "proof": "render/debrand_proof.png",
     "bundle": "export.zip",

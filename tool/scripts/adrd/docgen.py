@@ -1,7 +1,10 @@
 """The timestamped write-up that ships alongside the video."""
 from __future__ import annotations
 
+import html as _html
 import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -216,6 +219,117 @@ def markdown(session, tl: dict, walk: dict, branding: dict, flow: dict | None,
     return "\n".join(L) + "\n"
 
 
+class MissingTool(RuntimeError):
+    """A stage that needs an outside binary the machine may not have."""
+
+
+def _inline(s: str) -> str:
+    out = _html.escape(s, quote=False)
+    out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out)
+    return re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+
+
+STYLE = """
+body{font:11.5pt/1.5 -apple-system,Helvetica,Arial,sans-serif;color:#14181f;margin:0}
+h1{font-size:19pt;margin:0 0 4pt}h2{font-size:14pt;margin:18pt 0 6pt;
+border-bottom:1px solid #d4dae3;padding-bottom:3pt}
+h3{font-size:12pt;margin:14pt 0 4pt;color:#2c3a52}
+code{font:10pt ui-monospace,Menlo,monospace;background:#eef1f6;padding:1pt 3pt;border-radius:3pt}
+table{border-collapse:collapse;width:100%;margin:6pt 0;font-size:9.5pt}
+th{background:#eef1f6;text-align:left}th,td{border:1px solid #d4dae3;padding:3pt 5pt;
+vertical-align:top}
+ul,ol{margin:4pt 0 4pt 16pt;padding:0}li{margin:2pt 0}
+.note{background:#f4f7fb;border-left:3px solid #8aa5c8;padding:6pt 8pt;font-size:10.5pt}
+"""
+
+
+def html(md: str, title: str) -> str:
+    """Render the markdown subset this module emits. docgen writes the document, so the
+    grammar here is known - headings, lists, tables, code spans, bold, one blockquote -
+    and a real markdown library would be a dependency for eight line shapes."""
+    out: list[str] = []
+    tab: list[list[str]] = []
+    open_list = ""
+
+    def close_list():
+        nonlocal open_list
+        if open_list:
+            out.append(f"</{open_list}>")
+            open_list = ""
+
+    def flush_table():
+        if not tab:
+            return
+        head, body = tab[0], tab[1:]
+        out.append("<table><thead><tr>"
+                   + "".join(f"<th>{_inline(c)}</th>" for c in head) + "</tr></thead><tbody>"
+                   + "".join("<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in r) + "</tr>"
+                             for r in body) + "</tbody></table>")
+        tab.clear()
+
+    for line in (md or "").splitlines():
+        s = line.strip()
+        if s.startswith("|"):
+            close_list()
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if not all(set(c) <= set("-: ") and c for c in cells):
+                tab.append(cells)
+            continue
+        flush_table()
+        close_list()
+        if not s:
+            continue
+        for n in (1, 2, 3):
+            if s.startswith("#" * n + " "):
+                out.append(f"<h{n}>{_inline(s[n + 1:])}</h{n}>")
+                break
+        else:
+            if s.startswith("- "):
+                if open_list != "ul":
+                    close_list()
+                    out.append("<ul>")
+                    open_list = "ul"
+                out.append(f"<li>{_inline(s[2:])}</li>")
+            elif re.match(r"\d+\. ", s):
+                if open_list != "ol":
+                    close_list()
+                    out.append("<ol>")
+                    open_list = "ol"
+                out.append(f"<li>{_inline(re.sub(r'^[0-9]+. ', '', s))}</li>")
+            elif s.startswith("> "):
+                out.append(f'<p class=note>{_inline(s[2:])}</p>')
+            else:
+                out.append(f"<p>{_inline(s)}</p>")
+    flush_table()
+    close_list()
+    body = "\n".join(out)
+    return (f"<!doctype html><meta charset=utf-8><title>{_html.escape(title)}</title>"
+            f"<style>{STYLE}</style>{body}")
+
+
+def pdf(md: str, title: str, out_path: Path) -> Path:
+    """A4 report with page numbers, laid out by wkhtmltopdf - nothing in the stdlib puts a
+    table across pages, and a PDF faked out of monospaced text is not a report."""
+    tool = shutil.which("wkhtmltopdf")
+    if not tool:
+        raise MissingTool("wkhtmltopdf is not installed; the markdown report is still complete")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    page = out_path.with_suffix(".html")
+    page.write_text(html(md, title), encoding="utf-8")
+    try:
+        cp = subprocess.run([tool, "--quiet", "--disable-local-file-access", "--page-size", "A4",
+                             "--encoding", "utf-8", "--margin-top", "14mm",
+                             "--margin-bottom", "14mm", "--margin-left", "11mm",
+                             "--margin-right", "11mm", "--footer-right", "[page] / [pages]",
+                             "--footer-font-size", "8", "--footer-line", str(page),
+                             str(out_path)], capture_output=True, text=True, timeout=180)
+        if cp.returncode != 0:
+            raise MissingTool(f"wkhtmltopdf failed: {(cp.stdout + cp.stderr).strip()[-200:]}")
+    finally:
+        page.unlink(missing_ok=True)
+    return out_path
+
+
 def artifacts(session, extra: dict | None = None) -> Path:
     st = session.state()
     lines = [f"# Session artifacts - {st.get('app', 'app')}", "",
@@ -231,6 +345,7 @@ def artifacts(session, extra: dict | None = None) -> Path:
         ("final", "the video to share"),
         ("vtt", "chapter captions"),
         ("doc", "timestamped write-up"),
+        ("report", "same write-up as an A4 report"),
         ("sheet", "every screen, for box placement"),
         ("proof", "masked regions cut out of the final video"),
     ]

@@ -603,8 +603,13 @@ def cmd_doc(a) -> int:
     p = s.path("doc")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
+    try:
+        report = docgen.pdf(text, f"Walkthrough - {st.get('app', 'app')}", s.path("report"))
+    except docgen.MissingTool as e:
+        report = f"skipped: {e}"
     extra = docgen.artifacts(s, {"FLOW_MAP.md": str(s.path("flow").with_name("FLOW_MAP.md"))})
     print(p)
+    print(report)
     print(extra)
     return 0
 

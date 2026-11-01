@@ -123,7 +123,7 @@ $ADRD doc --session "$SESS" > /dev/null; check $? "doc"
 grep -q "unchanged - box is wrong" "$WORK/render.log" && check 1 "no mispositioned box" || check 0 "no mispositioned box"
 
 "$PY" - "$SESS" <<'PY'
-import json, sys
+import json, shutil, sys
 from pathlib import Path
 S = Path(sys.argv[1]); r = json.load(open(S / "render.json"))
 v = Path(r["video"])
@@ -137,6 +137,13 @@ doc = (S / "render/SESSION_DOC.md").read_text()
 assert "| 1 | splash | `00:00` |" in doc, doc[:600]
 assert "Shareable video" in doc and "never send this one" in doc
 assert len([l for l in doc.splitlines() if l.startswith("| `0")]) > 15
+pdf = S / "render/SESSION_DOC.pdf"
+if shutil.which("wkhtmltopdf"):
+    assert pdf.read_bytes()[:5] == b"%PDF-", pdf
+    assert f"`{pdf.relative_to(S)}`" in (S / "ARTIFACTS.md").read_text()
+    print(f"  ok   report pdf, {pdf.stat().st_size} bytes")
+else:
+    print("  skip report pdf - wkhtmltopdf not installed")
 print(f"  ok   mp4+vtt+proof+sweep+doc, tally {tally}")
 PY
 check $? "output assertions" || true

@@ -27,6 +27,7 @@ from .session import Session
 BOUNDARY = "adrdframe"
 RAW_MARK = "recording"
 ARTIFACTS = [("final", "shareable video"), ("vtt", "chapters"), ("doc", "session doc"),
+             ("report", "A4 report"),
              ("recording", "raw capture (unmasked)"), ("sheet", "screen sheet"),
              ("proof", "region proof"), ("bundle", "final export bundle")]
 LIVE_TTL = 45.0  # a status file this old means nothing is running

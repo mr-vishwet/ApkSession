@@ -148,6 +148,10 @@ def doctor() -> list[Probe]:
     probes.append(Probe("flutter", fl is not None, str(fl) if fl else "not found",
                         "only needed when the demo APK must be built"))
 
+    wk = shutil.which("wkhtmltopdf")
+    probes.append(Probe("wkhtmltopdf", wk is not None, str(wk) if wk else "not found",
+                        "only needed for the A4 report; SESSION_DOC.md is complete without it"))
+
     serials = list_serials() if adb else []
     emu = [s for s in serials if "-emu" in s or s.startswith("emulator-")]
     usb = [s for s in serials if s not in emu]

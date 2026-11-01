@@ -321,6 +321,25 @@ def test_mask_picker_box_lands_in_branding_and_rejects_bad_geometry(server, monk
     assert box[0]["scope"] == "screen:find_support" and box[0]["mode"] == "solid"
 
 
+def test_the_report_renders_and_says_so_when_the_tool_is_absent(tmp_path, monkeypatch):
+    """A run used to stop at markdown. The reviewer wants one file to hand over, so the
+    same text has to lay out as a report - and a machine without the converter still has
+    to finish the run with a message instead of a traceback."""
+    from adrd import docgen
+
+    md = ("# Walkthrough - app\n\n- Recorded: today\n\n**6 sample(s) show a box**\n\n"
+          "| # | Module |\n|---|---|\n| 1 | login <a> |\n")
+    page = docgen.html(md, "report")
+    assert "<h1>Walkthrough - app</h1>" in page
+    assert "<th>Module</th>" in page and "<td>login &lt;a&gt;</td>" in page
+    assert "<b>6 sample(s) show a box</b>" in page
+    assert "<li>Recorded: today</li>" in page
+
+    monkeypatch.setattr(docgen.shutil, "which", lambda name: None)
+    with pytest.raises(docgen.MissingTool):
+        docgen.pdf(md, "report", tmp_path / "SESSION_DOC.pdf")
+
+
 def test_a_box_drawn_on_the_page_can_be_removed_from_the_page(server):
     """The picker could only ever add. Undoing a box that landed on the wrong band meant
     editing branding.json by hand while the run was reading it, so every box is listed
