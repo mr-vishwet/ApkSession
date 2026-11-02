@@ -302,6 +302,35 @@ def test_the_walk_editor_renames_the_step_and_the_seconds_it_covers(server):
     assert len(json.loads((alpha / "walk.json").read_text())["steps"]) == 1
 
 
+def test_a_box_is_only_judged_on_the_seconds_it_covers(tmp_path, monkeypatch):
+    """A chapter can span several screens and a screen-scoped box is only on the air for
+    its own seconds. proof() decided which boxes were active from the chapter midpoint, so
+    a box due later was reported as a leak and one that had finished was reported too."""
+    from adrd import render as R
+    from adrd.session import Session
+
+    s = Session(tmp_path / "sess")
+    monkeypatch.setattr(R.ff, "frame",
+                        lambda src, t, out: (Path(out).parent.mkdir(parents=True, exist_ok=True),
+                                             Path(out).write_bytes(b"f"), Path(out))[-1])
+    monkeypatch.setattr(R, "crop_regions",
+                        lambda img, boxes, dest, prefix="": [Path(f"{dest}{prefix}.png")])
+    monkeypatch.setattr(R, "mask_state", lambda a, b, mode="blur": "judged")
+    monkeypatch.setattr(R, "contact_sheet", lambda items, out, cols=2: None)
+    monkeypatch.setattr(R, "_reference", lambda session, tl, t: Path("src.png"))
+
+    tl = {"chapters": [{"index": 0, "module": "flow", "t0": 0.0, "t1": 100.0}], "events": []}
+    blurs = [{"label": "logo", "rect": {"x": 0, "y": 0, "w": 10, "h": 10},
+              "windows": [[60.0, 70.0]], "mode": "blur"}]
+    out = R.proof(s, tl, blurs, Path("video.mp4"))
+    assert [r["at"] for r in out["rows"]] == [65.0], "only the sample inside the window"
+    assert out["tally"] == {"judged": 1}, out["tally"]
+
+    late = dict(blurs[0], windows=[[95.0, 99.0]])
+    assert R.proof(s, tl, [late], Path("video.mp4"))["rows"] == []
+    assert R.proof(s, tl, [], Path("video.mp4"))["chapters_without_blur"] == ["flow"]
+
+
 def test_the_leak_audit_judges_each_sample_against_its_own_screen(tmp_path):
     """The delivered rounds all reported a clean 20-region audit that had compared
     nothing: the reference still was looked up by screen name, and stills are saved under

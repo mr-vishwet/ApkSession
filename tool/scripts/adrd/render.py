@@ -256,14 +256,14 @@ def proof(session, tl: dict, blurs: list[dict], rendered: Path,
             shutil.rmtree(d)
     items, rows, missing = [], [], []
     for c in tl["chapters"]:
-        mid = (c["t0"] + c["t1"]) / 2
-        active = [b for b in blurs if any(a <= mid <= z for a, z in b["windows"])]
-        if not active:
-            missing.append(c["module"])
-        ref = None
         span = c["t1"] - c["t0"]
         for k, t in enumerate([c["t0"] + min(0.8, span * 0.35),
                                c["t0"] + span * 0.65][:max_samples]):
+            # a box scoped to one screen is only on the air for its own seconds: judged
+            # against the chapter mid, every sample outside that window looked unmasked
+            active = [b for b in blurs if any(a <= t <= z for a, z in b["windows"])]
+            if not active and c["module"] not in missing:
+                missing.append(c["module"])
             ref = _reference(session, tl, t)
             f = ff.frame(rendered, t, frames_dir / f"c{c['index']:02d}_{k}.png")
             tag = f"c{c['index']:02d}_{k}"
