@@ -627,9 +627,24 @@ def cmd_tunnel(a) -> int:
         if not shutil.which("cloudflared"):
             print("cloudflared is not installed", file=sys.stderr)
             return 1
-        print("cloudflared opens a browser here. Sign in to the Cloudflare account that "
-              "owns the zone you want, then re-run with --hostname.", flush=True)
-        return subprocess.call(["cloudflared", "tunnel", "login"])
+        if W.cf_cert().exists():
+            print(f"already signed in: {W.cf_cert()}")
+            return 0
+        print("cloudflared opens a browser here. Choose the zone on the Cloudflare page, "
+              "then Authorize, and leave this command running - the callback has nowhere "
+              "to land once it has exited.", flush=True)
+        rc = subprocess.call(["cloudflared", "tunnel", "login"])
+        if W.cf_cert().exists():
+            print(f"signed in: {W.cf_cert()}\nnext: adrd watch --session DIR --public "
+                  "--hostname adrd.<your-domain>")
+            return 0
+        print(f"no certificate at {W.cf_cert()} (cloudflared exit {rc}).\n"
+              "  - the browser has to finish while this command is still waiting\n"
+              "  - the account needs a domain (zone) on Cloudflare; an account without one\n"
+              "    cannot be handed a fixed hostname, only throwaway quick-tunnel names\n"
+              "  - if the browser downloaded cert.pem instead, move it to that path",
+              file=sys.stderr)
+        return 1
     if a.stop:
         rec = W.read_json(W.tunnel_record(d), {})
         if rec.get("pid"):

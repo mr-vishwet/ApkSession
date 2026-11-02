@@ -659,6 +659,42 @@ def test_a_stage_left_running_by_a_dead_runner_is_called_interrupted(tmp_path):
     assert stages[1]["state"] == "waiting"
 
 
+def test_the_login_command_explains_why_there_is_still_no_certificate(tmp_path, monkeypatch,
+                                                                      capsys):
+    """Two attempts ended in cloudflared's bare "Failed to fetch resource", which tells an
+    operator nothing about the two real causes: closing the browser step after the waiting
+    command exited, or an account with no domain to attach a hostname to."""
+    from types import SimpleNamespace
+
+    from adrd import cli
+
+    root = tmp_path / "s"
+    root.mkdir()
+    (root / "state.json").write_text(json.dumps({"app": "s"}))
+    cert = tmp_path / ".cloudflared" / "cert.pem"
+    monkeypatch.setattr(cli.W, "cf_cert", lambda: cert)
+    monkeypatch.setattr(cli.shutil, "which", lambda n: "/opt/homebrew/bin/cloudflared")
+    a = SimpleNamespace(session=str(root), login=True, stop=False, restart=False,
+                        hostname=None, port=None)
+    monkeypatch.setattr(cli.subprocess, "call", lambda cmd, **k: 1)
+    assert cli.cmd_tunnel(a) == 1
+    err = capsys.readouterr().err
+    assert "no certificate" in err and "zone" in err
+    assert "leave this command running" in err or "still waiting" in err
+
+    def fakes_login(cmd, **k):
+        cert.parent.mkdir(parents=True, exist_ok=True)
+        cert.write_text("pretend")
+        return 0
+
+    monkeypatch.setattr(cli.subprocess, "call", fakes_login)
+    assert cli.cmd_tunnel(a) == 0
+    out = capsys.readouterr().out
+    assert "signed in" in out and "--hostname" in out
+
+    assert cli.cmd_tunnel(a) == 0 and "already signed in" in capsys.readouterr().out
+
+
 def test_a_restarted_dashboard_keeps_the_link_people_already_have(tmp_path, monkeypatch):
     """Reusing the hostname was not enough: the token is part of the URL, so a restart
     that minted a new one left everyone holding a link that 401s. The whole URL has to
