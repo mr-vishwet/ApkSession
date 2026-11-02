@@ -657,6 +657,78 @@ def test_a_stage_left_running_by_a_dead_runner_is_called_interrupted(tmp_path):
     assert stages[1]["state"] == "waiting"
 
 
+def test_a_restarted_dashboard_keeps_the_link_people_already_have(tmp_path, monkeypatch):
+    """Reusing the hostname was not enough: the token is part of the URL, so a restart
+    that minted a new one left everyone holding a link that 401s. The whole URL has to
+    survive, which is the practical meaning of a shareable link on a quick tunnel."""
+    import os
+    import socket
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    (sessions / "tunnel.json").write_text(json.dumps(
+        {"url": "https://shared.trycloudflare.com", "pid": os.getpid(),
+         "local": f"http://127.0.0.1:{port}", "token": "abc123"}))
+    monkeypatch.setattr(watch, "tunnel", lambda *a, **k: "https://shared.trycloudflare.com")
+
+    srv = watch.start(sessions, port=port, public=True, focus="s",
+                      open_browser=False, expires_h=0)
+    try:
+        assert srv.cfg["token"] == "abc123"
+        assert srv.public_url == "https://shared.trycloudflare.com/s/s/?t=abc123"
+        assert srv.cfg["port"] == port, "the tunnel's port, not the next free one"
+    finally:
+        srv.shutdown_all()
+
+
+def test_a_live_tunnel_keeps_its_port_instead_of_minting_a_new_hostname(tmp_path, capsys):
+    """A quick-tunnel hostname belongs to the cloudflared process, not to the dashboard.
+    Restarting on the next free port used to throw away a link that was still working."""
+    import os
+    import socket
+    from types import SimpleNamespace
+
+    from adrd import cli
+
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    port = free.getsockname()[1]
+    free.close()
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "tunnel.json").write_text(json.dumps(
+        {"url": "https://shared-try.trycloudflare.com", "pid": os.getpid(),
+         "local": f"http://127.0.0.1:{port}"}))
+    assert watch._tunnel_port(sessions, "127.0.0.1", 8734) == port
+    assert "keeping port" in capsys.readouterr().out
+
+    (sessions / "tunnel.json").write_text(json.dumps(
+        {"url": "https://dead-try.trycloudflare.com", "pid": 999999,
+         "local": f"http://127.0.0.1:{port}"}))
+    assert watch._tunnel_port(sessions, "127.0.0.1", 8734) == 8734
+
+    root = sessions / "s"
+    root.mkdir()
+    ask = lambda: cli.cmd_url(SimpleNamespace(session=str(root)))
+    (sessions / "tunnel.json").write_text(json.dumps(
+        {"url": "https://shared-try.trycloudflare.com", "pid": os.getpid(),
+         "local": f"http://127.0.0.1:{port}"}))
+    (root / "state.json").write_text(json.dumps({"app": "s"}))
+    assert ask() == 1 and "adrd watch" in capsys.readouterr().err
+
+    (root / "state.json").write_text(json.dumps(
+        {"app": "s", "public_url": "https://shared-try.trycloudflare.com/s/s/?t=k"}))
+    assert ask() == 0 and "shared-try" in capsys.readouterr().out
+
+    (sessions / "tunnel.json").unlink()
+    assert ask() == 1 and "not running" in capsys.readouterr().err
+
+
 def test_the_picker_still_knows_the_frame_when_the_timeline_does_not(server):
     """Every box is measured against a frame size. Sessions taken before the timeline
     carried one reported size [], so a drag sent a 0x0 box and the server had no frame

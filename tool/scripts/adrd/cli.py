@@ -98,6 +98,26 @@ def cmd_devices(a) -> int:
     return 0
 
 
+def cmd_url(a) -> int:
+    """Answer "what is the link" without guessing which of the printed lines is current.
+
+    A quick-tunnel hostname belongs to the cloudflared process, so a recorded URL whose
+    process is gone is a dead link, not an old one - saying so is the useful part."""
+    s = Session(a.session)
+    url = s.state().get("public_url") or ""
+    live = W.tunnel_status(s.root.parent)
+    if not url:
+        print("no public URL recorded for this session - start one with "
+              "adrd watch --session DIR --public", file=sys.stderr)
+        return 1
+    if not live:
+        print(f"the tunnel behind {url} is not running - restart watch --public and "
+              "a new hostname will be issued", file=sys.stderr)
+        return 1
+    print(url if url.startswith(live) else f"{url}\n  note: this tunnel now answers at {live}")
+    return 0
+
+
 def cmd_shot(a) -> int:
     adb, s = _adb(a), Session(a.session)
     _stamp(adb, s)
@@ -707,6 +727,10 @@ def build_parser() -> argparse.ArgumentParser:
     d.set_defaults(fn=cmd_doctor)
     d = sub.add_parser("devices")
     d.set_defaults(fn=cmd_devices)
+
+    u = sub.add_parser("url", help="print the live public link for a session")
+    u.add_argument("--session", required=True)
+    u.set_defaults(fn=cmd_url)
 
     n = sub.add_parser("new", help="create a session dir from a Flutter project path")
     n.add_argument("--project", required=True)

@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -1217,6 +1218,44 @@ def tunnel(local_url: str, log: Path, sessions_dir: Path,
     return None
 
 
+def _bindable(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _tunnel_port(sessions_dir: Path, host: str, port: int) -> int:
+    """A quick tunnel's hostname belongs to the cloudflared process, not to this one, so
+    the only way to keep the link you already shared is to keep serving the port it
+    forwards to. Bumping to the next free port would mint a brand new hostname."""
+    rec = read_json(tunnel_record(sessions_dir), {}) or {}
+    if not _alive(rec.get("pid")):
+        return port
+    try:
+        tp = int(str(rec.get("local") or "").rsplit(":", 1)[-1])
+    except ValueError:
+        return port
+    if not tp:
+        return port
+    deadline = time.time() + 8
+    while not _bindable(host, tp) and time.time() < deadline:
+        time.sleep(0.4)
+    if not _bindable(host, tp):
+        # restarting too soon finds the previous watcher's socket still held; jumping to
+        # the next port here would kill a tunnel whose link people already have
+        print(f"  port {tp} is busy while a live tunnel points at it - a new hostname "
+              "is about to be issued", flush=True)
+        return port
+    if tp != port:
+        print(f"  keeping port {tp} for the live tunnel so the URL does not change",
+              flush=True)
+    return tp
+
+
 def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
           token: str | None = None, adb=None, focus: str | None = None,
           open_browser: bool = True, public: bool = False,
@@ -1226,6 +1265,15 @@ def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
     sessions_dir = Path(sessions_dir).resolve()
     sessions_dir.mkdir(parents=True, exist_ok=True)
     loopback = host in ("127.0.0.1", "localhost", "::1")
+    if public:
+        port = _tunnel_port(sessions_dir, host, port)
+        rec = read_json(tunnel_record(sessions_dir), {}) or {}
+        # the link already shared carries its own token, so reusing the hostname without
+        # it would hand everyone a URL that 401s
+        if not token and _alive(rec.get("pid")) and rec.get("token") and \
+           str(rec.get("local", "")).endswith(f":{port}"):
+            token = rec["token"]
+            print("  reusing the shared link's token as well", flush=True)
     # A tunnel reaches a loopback bind just fine, so `--public` must force the token
     # itself; relying on the bind to decide would leave the whole thing wide open.
     if (not loopback or public) and not token:
@@ -1256,6 +1304,10 @@ def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
             page = f"{pub}/s/{focus}/?t={token}" if focus else f"{pub}/?t={token}"
             print(f"PUBLIC {page}", flush=True)
             srv.public_url = page
+            d = read_json(tunnel_record(sessions_dir), {}) or {}
+            if d.get("token") != token:  # so the next restart can reuse this whole link
+                d["token"] = token
+                tunnel_record(sessions_dir).write_text(json.dumps(d))
             if expires_h:
                 threading.Timer(expires_h * 3600, srv.shutdown_all, ()).start()
                 print(f"  auto-closes in {expires_h:g}h", flush=True)
