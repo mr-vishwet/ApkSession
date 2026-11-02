@@ -28,7 +28,7 @@ def _watch(a, s: Session, adb: Adb | None = None):
     return W.start(s.root.parent, port=a.port, host=host, token=a.token, adb=adb,
                    focus=s.root.name, open_browser=not a.no_browser,
                    public=getattr(a, "public", False), expires_h=a.expires,
-                   allow_unmasked=not getattr(a, "hide_unmasked", False))
+                   allow_unmasked=getattr(a, "allow_unmasked", False))
 
 
 def _linger(a, srv) -> None:
@@ -62,7 +62,7 @@ def cmd_watch(a) -> int:
     srv = W.start(s.root.parent, port=a.port, host="0.0.0.0" if a.lan else a.host,
                   token=a.token, adb=adb, focus=s.root.name,
                   open_browser=not a.no_browser, public=a.public, expires_h=a.expires,
-                  allow_unmasked=not a.hide_unmasked,
+                  allow_unmasked=a.allow_unmasked,
                   hostname=getattr(a, "hostname", None))
     if srv.public_url:
         s.update_state(public_url=srv.public_url)
@@ -801,8 +801,8 @@ def watch_flags(sp) -> None:
     sp.add_argument("--keep-alive", type=int, default=60,
                     help="seconds the dashboard stays up after the command ends")
     sp.add_argument("--no-browser", action="store_true")
-    sp.add_argument("--hide-unmasked", action="store_true",
-                    help="refuse to serve the unmasked raw capture to viewers")
+    sp.add_argument("--allow-unmasked", action="store_true",
+                    help="serve the unmasked raw capture to viewers even off this machine")
     sp.add_argument("--public", action="store_true",
                     help="also expose it through a cloudflared quick tunnel (token forced)")
     sp.add_argument("--expires", type=float, default=6.0,
@@ -962,8 +962,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="expose through a cloudflared quick tunnel; token is forced on")
     w.add_argument("--expires", type=float, default=6.0)
     w.add_argument("--no-browser", action="store_true")
-    w.add_argument("--hide-unmasked", action="store_true",
-                   help="refuse to serve the unmasked raw capture to viewers")
+    w.add_argument("--allow-unmasked", action="store_true",
+                   help="serve the unmasked raw capture to viewers even off this machine")
     w.add_argument("--daemon", action="store_true",
                    help="survive the shell that started it (new session, not just nohup)")
     w.set_defaults(fn=cmd_watch)

@@ -1364,7 +1364,7 @@ def _tunnel_port(sessions_dir: Path, host: str, port: int) -> int:
 def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
           token: str | None = None, adb=None, focus: str | None = None,
           open_browser: bool = True, public: bool = False,
-          expires_h: float = 6.0, allow_unmasked: bool = True,
+          expires_h: float = 6.0, allow_unmasked: bool = False,
           hostname: str | None = None) -> Server:
     """Start the dashboard. Returns the server; call shutdown_all() when done."""
     sessions_dir = Path(sessions_dir).resolve()
@@ -1386,7 +1386,8 @@ def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
     port = pick_port(host, port)
     cfg = {"dir": sessions_dir, "host": host, "port": port, "token": token or "",
            "loopback": loopback and not public, "adb": adb, "stream_ttl": 300,
-           "allow_unmasked": allow_unmasked}
+           # off this machine the raw capture is never served unless the owner asks for it
+           "allow_unmasked": allow_unmasked or (loopback and not public)}
     srv = Server(cfg)
     srv.serve_thread()
     base = f"http://{'127.0.0.1' if loopback and not public else _lan_ip()}:{port}"

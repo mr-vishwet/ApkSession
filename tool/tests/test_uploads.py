@@ -353,6 +353,36 @@ def test_the_leak_audit_judges_each_sample_against_its_own_screen(tmp_path):
     assert R._reference(s, tl2, 5.0) is None, "a missing still must not be passed off as a check"
 
 
+def test_the_raw_capture_stays_on_the_machine_once_the_door_is_public(tmp_path):
+    """A shared URL is the only access control, so the unmasked recording must not ride
+    behind it. Locally it downloads as before; off the machine it is refused until the
+    owner asks for it by name."""
+    sessions = tmp_path / "sessions"
+    alpha = sessions / "alpha"
+    (alpha / "render").mkdir(parents=True)
+    (alpha / "state.json").write_text(json.dumps({"package": "com.example.app"}))
+    (alpha / "recording.mp4").write_bytes(b"raw-bytes")
+    (alpha / "render" / "demo_debranded.mp4").write_bytes(b"masked-bytes")
+    cfg = {"dir": sessions, "host": "0.0.0.0", "port": 0, "token": TOKEN,
+           "loopback": False, "adb": None, "stream_ttl": 1.0, "allow_unmasked": False}
+    srv = watch.Server(cfg)
+    srv.serve_thread()
+    port = srv.server_address[1]
+    try:
+        code, body = req(port, "GET", f"/s/alpha/f/recording.mp4?t={TOKEN}")
+        assert code == 403 and b"--allow-unmasked" in body, body
+        code, body = req(port, "GET", f"/s/alpha/f/render/demo_debranded.mp4?t={TOKEN}")
+        assert code == 200 and body == b"masked-bytes", "the masked cut still ships"
+    finally:
+        srv.shutdown_all()
+
+    own = watch.start(sessions, port=0, host="127.0.0.1", open_browser=False)
+    try:
+        assert own.cfg["allow_unmasked"] is True, "the owner keeps their own raw capture"
+    finally:
+        own.shutdown_all()
+
+
 def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkeypatch):
     """The bookmarkable URL is the one requirement that cannot be shown with a quick
     tunnel, so drive the real named-tunnel path against a stub cloudflared: the create,
