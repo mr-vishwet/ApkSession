@@ -260,10 +260,11 @@ def proof(session, tl: dict, blurs: list[dict], rendered: Path,
         active = [b for b in blurs if any(a <= mid <= z for a, z in b["windows"])]
         if not active:
             missing.append(c["module"])
-        ref = _reference(session, tl, c)
+        ref = None
         span = c["t1"] - c["t0"]
         for k, t in enumerate([c["t0"] + min(0.8, span * 0.35),
                                c["t0"] + span * 0.65][:max_samples]):
+            ref = _reference(session, tl, t)
             f = ff.frame(rendered, t, frames_dir / f"c{c['index']:02d}_{k}.png")
             tag = f"c{c['index']:02d}_{k}"
             for j, box in enumerate(b["rect"] for b in active):
@@ -287,18 +288,39 @@ def proof(session, tl: dict, blurs: list[dict], rendered: Path,
     tally: dict[str, int] = {}
     for r in rows:
         tally[r["state"]] = tally.get(r["state"], 0) + 1
-    attention = [r for r in rows if r["state"] in ("untouched", "review")]
+    attention = [r for r in rows
+                 if r["state"] != "strongly reduced - confirm by eye"]
     return {"sheet": str(sheet) if sheet else None, "regions": len(rows), "tally": tally,
             "attention": attention, "chapters_without_blur": missing, "rows": rows[:400]}
 
 
-def _reference(session, tl: dict, chapter: dict) -> Path | None:
-    """A pre-blur still of a screen inside this chapter, for change detection."""
+def _reference(session, tl: dict, t: float) -> Path | None:
+    """A pre-blur still of the screen showing at this second, for change detection.
+
+    The still a step captured is recorded on the event; looking one up by screen name
+    never matched, so every box was judged against nothing and the sheet still printed
+    a tally. Nearest in time matters: a status bar compared against a different screen
+    reads as a change that never happened. A still of a different size is useless too,
+    because the box rect is read in the rendered frame's coordinates."""
     video = ff.dims(session.path("recording")) if session.path("recording").exists() else None
-    for e in tl["events"]:
-        if not e.get("screen") or not (chapter["t0"] <= e["t"] <= chapter["t1"]):
-            continue
-        p = session.stills / f"{e['screen']}.png"
+    events = [e for e in tl["events"] if _ref_path(session, e)]
+    if not events:
+        return None
+    nearest = min(events, key=lambda e: abs(e["t"] - t))
+    return _ref_path(session, nearest)
+
+
+def _ref_path(session, e: dict) -> Path | None:
+    named = [Path(e["still"])] if e.get("still") else []
+    named += [session.stills / Path(named[0]).name] if named else []
+    if e.get("screen"):
+        named.append(session.stills / f"{e['screen']}.png")
+    video = _video_dims(session)
+    for p in named:
         if p.exists() and (video is None or ff.dims(p) == video):
             return p
     return None
+
+
+def _video_dims(session) -> tuple | None:
+    return ff.dims(session.path("recording")) if session.path("recording").exists() else None

@@ -302,6 +302,28 @@ def test_the_walk_editor_renames_the_step_and_the_seconds_it_covers(server):
     assert len(json.loads((alpha / "walk.json").read_text())["steps"]) == 1
 
 
+def test_the_leak_audit_judges_each_sample_against_its_own_screen(tmp_path):
+    """The delivered rounds all reported a clean 20-region audit that had compared
+    nothing: the reference still was looked up by screen name, and stills are saved under
+    capture filenames. Every box was silently unjudged."""
+    from adrd import render as R
+    from adrd.session import Session
+
+    s = Session(tmp_path / "sess")
+    first = s.stills / "F0-home.png"
+    second = s.stills / "chk_009.png"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
+    tl = {"events": [{"i": 0, "t": 1.0, "screen": "launch", "still": str(first)},
+                     {"i": 1, "t": 9.0, "screen": "postcode", "still": str(second)}]}
+    assert R._reference(s, tl, 8.6) == second, "nearest in time, not first in the walk"
+    assert R._reference(s, tl, 1.4) == first
+
+    gone = s.stills / "nope.png"
+    tl2 = {"events": [{"i": 0, "t": 5.0, "screen": "launch", "still": str(gone)}]}
+    assert R._reference(s, tl2, 5.0) is None, "a missing still must not be passed off as a check"
+
+
 def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkeypatch):
     """The bookmarkable URL is the one requirement that cannot be shown with a quick
     tunnel, so drive the real named-tunnel path against a stub cloudflared: the create,
