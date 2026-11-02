@@ -1147,14 +1147,18 @@ def named_tunnel(local_url: str, log: Path, sessions_dir: Path, hostname: str) -
     cred = cf_dir() / f"{name}.json"
     with log.open("a") as fh:
         if not cred.exists():
-            cp = subprocess.run(["cloudflared", "tunnel", "create", name],
+            # cloudflared's default filename is not the tunnel name, so say where to put
+            # the credential instead of guessing it and re-creating the tunnel each start
+            cp = subprocess.run(["cloudflared", "tunnel", "create", name,
+                                 "--credentials-file", str(cred)],
                                 stdout=fh, stderr=subprocess.STDOUT, text=True)
             if cp.returncode != 0 or not cred.exists():
                 return None
         uuid = json.loads(cred.read_text()).get("tunnel_id") or name
         cfg = tunnel_config(sessions_dir, name, uuid, hostname, local_url)
         if not (sessions_dir / f"{name}.routed").exists():
-            cp = subprocess.run(["cloudflared", "tunnel", "route", "dns", name, hostname],
+            cp = subprocess.run(["cloudflared", "tunnel", "route", "dns", "--overwrite-dns",
+                                 name, hostname],
                                 stdout=fh, stderr=subprocess.STDOUT, text=True)
             if cp.returncode != 0:
                 return None

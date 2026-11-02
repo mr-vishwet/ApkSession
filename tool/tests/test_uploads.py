@@ -280,7 +280,7 @@ def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkey
         "#!/bin/sh\n"
         f'echo "$@" >> {calls}\n'
         f'if [ "$1 $2" = "tunnel create" ]; then '
-        f'printf \'{{"tunnel_id":"abc-123"}}\' > {cf}/$3.json; fi\n'
+        f'printf \'{{"tunnel_id":"abc-123"}}\' > "$5"; fi\n'
         'if [ "$3" = "--config" ]; then sleep 30; fi\n'
         "exit 0\n", encoding="utf-8")
     stub.chmod(0o755)
@@ -294,7 +294,9 @@ def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkey
     assert "service: http://127.0.0.1:8734" in cfg
     assert f"credentials-file: {cf / 'adrd.json'}" in cfg
     logged = (tmp_path / "calls.txt").read_text()
-    assert "tunnel create adrd" in logged and "tunnel route dns adrd adrd.example.com" in logged
+    # the credential location is stated, not guessed, and a stale CNAME is replaced
+    assert f"tunnel create adrd --credentials-file {cf / 'adrd.json'}" in logged
+    assert "tunnel route dns --overwrite-dns adrd adrd.example.com" in logged
 
     rec = json.loads(watch.tunnel_record(sessions).read_text())
     assert rec["named"] is True and rec["url"] == "https://adrd.example.com"
