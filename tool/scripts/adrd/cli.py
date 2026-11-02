@@ -350,6 +350,82 @@ def cmd_retimeline(a) -> int:
     return 0
 
 
+def _walk_index(a, steps: list[dict]) -> int | None:
+    if len(a.index) != 1:
+        print(f"walk {a.what} --index i", file=sys.stderr)
+        return None
+    try:
+        i = int(a.index[0])
+    except ValueError:
+        print("index must be a number", file=sys.stderr)
+        return None
+    if not 0 <= i < len(steps):
+        print(f"no step {i} - {len(steps)} in this walk", file=sys.stderr)
+        return None
+    return i
+
+
+def cmd_walk(a) -> int:
+    """Edit the recorded walk. A screen name decides which seconds a mask box covers and a
+    label becomes the burned-in caption, so both live twice - in walk.json for the next
+    take, and in events.json for the recording that already happened. Changing one and
+    not the other is exactly how a box ends up masking the wrong minute."""
+    s = Session(a.session)
+    w = s.read("walk")
+    steps = w.get("steps", [])
+    ev = s.read("events", None) if s.exists("events") else None
+
+    if a.what == "list":
+        for i, st in enumerate(steps):
+            ops = ",".join(o.get("op", "?") for o in st.get("do", []))
+            print(f"{i:2d} {st.get('screen', ''):<14} {ops:<26} {st.get('label', '')}")
+        return 0
+
+    i = _walk_index(a, steps)
+    if i is None:
+        return 2
+    touched = False
+    if a.what == "set":
+        if not (a.screen or a.label):
+            print("walk set needs --screen and/or --label", file=sys.stderr)
+            return 2
+        st = steps[i]
+        for key in ("screen", "label"):
+            val = getattr(a, key)
+            if val:
+                st[key] = val
+                touched = True
+    elif a.what == "rm":
+        steps.pop(i)
+        touched = True
+
+    if ev is not None:
+        if a.what == "rm":
+            ev["events"] = [e for e in ev["events"] if e.get("i") != i]
+            for n, e in enumerate(ev["events"]):
+                e["i"] = n
+        else:
+            for e in ev["events"]:
+                if e.get("i") != i:
+                    continue
+                for key in ("screen", "label"):
+                    val = getattr(a, key)
+                    if val:
+                        e[key] = val
+        s.write("events", ev, quiet=True)
+    s.write("walk", w)
+
+    if a.what == "rm":
+        print(f"removed step {i}; {len(steps)} steps left")
+    else:
+        st = steps[i]
+        print(f"step {i}: screen={st.get('screen', '')} label={st.get('label', '')}")
+    if touched and ev is not None and s.exists("timeline"):
+        print("  the recording is already made, so rebuild the windows from it: "
+              f"adrd retimeline --session {s.root}")
+    return 0
+
+
 def cmd_brand(a) -> int:
     s = Session(a.session)
     b = s.read("branding", {"entries": []})
@@ -808,6 +884,14 @@ def build_parser() -> argparse.ArgumentParser:
     cc = sub.add_parser("concat", help="join pulled segments")
     cc.add_argument("--session", required=True)
     cc.set_defaults(fn=cmd_concat)
+
+    wk = sub.add_parser("walk", help="list or edit the recorded walk")
+    wk.add_argument("what", choices=["list", "set", "rm"])
+    wk.add_argument("--session", required=True)
+    wk.add_argument("--index", nargs="*", default=[])
+    wk.add_argument("--screen", help="which screen this step is meant to land on")
+    wk.add_argument("--label", help="caption burned in for this step")
+    wk.set_defaults(fn=cmd_walk)
 
     b = sub.add_parser("brand", help="add/list brand boxes")
     b.add_argument("what", choices=["add", "list", "rm", "set", "preset"])

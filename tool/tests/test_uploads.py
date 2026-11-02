@@ -240,7 +240,8 @@ def test_editing_a_box_marks_the_video_stale_and_offers_the_repair(server, monke
     watch.RUNS.clear()
 
     code, out = req(port, "POST", f"/s/alpha/api/render?t={TOKEN}")
-    assert code == 202 and out["stages"] == ["render", "sweep", "doc", "export"], out
+    assert code == 202 and out["stages"] == ["retimeline", "render", "sweep", "doc",
+                                    "export"], out
     assert out["export_includes_raw"] is False, "a repair must not start shipping the raw capture"
     run = None
     for _ in range(80):
@@ -250,7 +251,8 @@ def test_editing_a_box_marks_the_video_stale_and_offers_the_repair(server, monke
                 break
         time.sleep(0.05)
     assert run, "the re-render never wrote its stage record"
-    assert [h["name"] for h in run["stages"]] == ["render", "sweep", "doc", "export"]
+    assert [h["name"] for h in run["stages"]] == ["retimeline", "render", "sweep", "doc",
+                                           "export"]
     assert all(h["state"] == "ok" for h in run["stages"]), run
 
     os.utime(vid, (now + 5, now + 5))
@@ -260,6 +262,44 @@ def test_editing_a_box_marks_the_video_stale_and_offers_the_repair(server, monke
     (alpha / "timeline.json").unlink()
     code, out = req(port, "POST", f"/s/alpha/api/render?t={TOKEN}")
     assert code == 400, out
+
+
+def test_the_walk_editor_renames_the_step_and_the_seconds_it_covers(server):
+    """The screen name is what ties a mask box to a stretch of the recording. Editing it
+    only in walk.json fixes the next take and leaves this one masking the wrong minute,
+    which is the bug this route exists to prevent."""
+    port, alpha = server
+    (alpha / "walk.json").write_text(json.dumps(
+        {"steps": [{"action": "tap", "screen": "home", "label": "C01 home"},
+                  {"action": "tap", "screen": "category", "label": "C02 category"}]}))
+    (alpha / "events.json").write_text(json.dumps(
+        {"events": [{"i": 0, "screen": "home", "label": "C01 home"},
+                    {"i": 1, "screen": "category", "label": "C02 category"}]}))
+
+    def walk(**q):
+        from urllib.parse import quote
+        qs = "&".join(f"{k}={quote(str(v))}" for k, v in q.items())
+        return req(port, "POST", f"/s/alpha/api/walk?t={TOKEN}&{qs}")
+
+    code, out = walk(op="set", i=1, screen="postcode", label="C02 postcode")
+    assert code == 200, out
+    steps = json.loads((alpha / "walk.json").read_text())["steps"]
+    events = json.loads((alpha / "events.json").read_text())["events"]
+    assert steps[1]["screen"] == "postcode" and steps[1]["label"] == "C02 postcode"
+    assert events[1]["screen"] == "postcode", "the recorded windows must follow the rename"
+
+    code, st = req(port, "GET", f"/s/alpha/state?t={TOKEN}")
+    assert [x["screen"] for x in st["walk"]] == ["home", "postcode"], st["walk"]
+
+    code, out = walk(op="set", i=9)
+    assert code == 400 and "no step 9" in out["error"], out
+    code, out = walk(op="set", i=0, screen="../etc")
+    assert code == 400, out
+    code, out = walk(op="set", i=0)
+    assert code == 400 and "nothing to change" in out["error"], out
+    code, out = walk(op="rm", i=0)
+    assert code == 200, out
+    assert len(json.loads((alpha / "walk.json").read_text())["steps"]) == 1
 
 
 def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkeypatch):
@@ -635,7 +675,8 @@ def test_the_run_records_every_stage_so_the_page_can_show_the_pipeline(tmp_path,
 
     run = json.loads((root / "inputs" / "run.json").read_text())
     names = [h["name"] for h in run["stages"]]
-    assert names == ["launch", "take", "brand", "render", "sweep", "doc", "export"], names
+    assert names == ["launch", "take", "brand", "retimeline", "render", "sweep", "doc",
+                "export"], names
     states = {h["name"]: h["state"] for h in run["stages"]}
     assert states["launch"] == "ok" and states["render"] == "ok"
     assert states["sweep"] == "failed", states

@@ -33,6 +33,8 @@ ARTIFACTS = [("final", "shareable video"), ("vtt", "chapters"), ("doc", "session
              ("report", "A4 report"),
              ("recording", "raw capture (unmasked)"), ("sheet", "screen sheet"),
              ("proof", "region proof"), ("bundle", "final export bundle")]
+RUN_STAGES = ("launch", "take", "brand", "retimeline", "render", "sweep", "doc",
+            "export")
 LIVE_TTL = 45.0  # a status file this old means nothing is running
 
 RUN_LOCK = threading.Lock()
@@ -74,6 +76,9 @@ def _run_stages(root: Path, name: str, apk: Path, raw: bool = False,
         ("take", [py, adrd, "take", "--session", str(root)]),
         ("brand", [py, adrd, "brand", "preset", "--session", str(root),
                    "--name", "debug-banner", "topbar-title", "status-bar"]),
+        # rebuilds the chapter and screen windows from the recorded events, so a walk
+        # re-tag made after the take is honoured by the very next render
+        ("retimeline", [py, adrd, "retimeline", "--session", str(root)]),
         ("render", [py, adrd, "render", "--session", str(root), "--step-captions"]),
         ("sweep", [py, adrd, "sweep", "--session", str(root)]),
         ("doc", [py, adrd, "doc", "--session", str(root)]),
@@ -81,6 +86,8 @@ def _run_stages(root: Path, name: str, apk: Path, raw: bool = False,
         ("export", [py, adrd, "export", "--session", str(root),
                     "--yes" if raw else "--no-raw"]),
     ]
+    if only is None:
+        only = RUN_STAGES
     if only:
         stages = [s for s in stages if s[0] in only]
     started = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -215,6 +222,10 @@ def session_view(root: Path) -> dict:
                       "frac": [frac.get("x", 0), frac.get("y", 0),
                                frac.get("w", 0), frac.get("h", 0)]})
     arts = []
+    walk = read_json(s.root / "walk.json", {}) or {}
+    steps_w = [{"i": n, "screen": st.get("screen") or "", "label": st.get("label") or "",
+                "ops": ",".join(o.get("op", "?") for o in st.get("do", []))}
+               for n, st in enumerate(walk.get("steps", []))]
     steps = [{"i": e.get("i"), "t": e.get("t"), "screen": e.get("screen") or "",
               "label": e.get("label") or "", "mismatch": bool(e.get("mismatch")),
               "stuck": e.get("stuck") or ""} for e in tl.get("events", [])]
@@ -247,7 +258,7 @@ def session_view(root: Path) -> dict:
         "step": status, "duration": dur, "offset": tl.get("offset"),
         "align": tl.get("align", {}), "chapters": tl.get("chapters", []),
         "boxes": boxes, "screens": tl.get("screens", {}), "run": run,
-        "steps": steps, "stale": stale,
+        "steps": steps, "stale": stale, "walk": steps_w,
         "artifacts": arts, "progress": prog, "percent": pct,
         "proof": (rend.get("proof") or {}).get("tally", {}),
         "video_ready": bool((rend.get("video") or "")) and Path(rend.get("video", "")).exists(),
@@ -319,6 +330,7 @@ video{width:100%;max-height:52vh;background:#000;border-radius:8px}
 </div><div>
 <div class=stage><h2>Chapters</h2><div class=rail id=rail></div></div>
 <div class=stage><h2>Steps</h2><div id=steps></div></div>
+<div class=stage><h2>Walk</h2><div id=walk></div></div>
 <div class=stage><h2>Artifacts</h2><div id=arts></div></div>
 <div class=stage><h2>Masking</h2><div id=mask></div></div>
 <div class=stage><h2>Mask picker</h2>
@@ -425,7 +437,8 @@ async function tick(){let j;
  // this panel repaints every 1.5s; rebuilding it under an open dropdown loses the
  // choice. Buttons keep their focus after a click, so only a select holds the panel still.
  const ae=document.activeElement;
- if(!(ae&&ae.tagName==='SELECT'&&mkEl.contains(ae)))
+ const editing=el=>ae&&['INPUT','SELECT','TEXTAREA'].includes(ae.tagName)&&el.contains(ae);
+ if(!editing(mkEl))
   mkEl.innerHTML=`<div>${j.boxes.length} box(es)</div>`+
   j.boxes.map(b=>`<div class=row style=margin-top:4px><span class=n>${ht(b.label)} (${ht(b.mode)}) ${ht(win(b))}</span>`+
    `<select data-sc=${b.i} style=margin-left:6px>`+sn.map(n=>`<option${n===b.scope.replace('screen:','')?' selected':''}>${n}</option>`).join('')+`</select>`+
@@ -434,6 +447,17 @@ async function tick(){let j;
   (bad.length?`<div class=warn style=margin-top:8px>${bad.length} box covers nothing - fix its screen name or rect</div>`:'')+
   '<div class=warn style=margin-top:10px>Everything on this page is UNMASKED '
   +'client content. The only shareable file is the rendered mp4.</div>';
+ const wk=j.walk||[], wkEl=document.getElementById('walk');
+ const wsig=wk.map(x=>x.i+'|'+x.screen+'|'+x.label).join(';');
+ // the walk rows are text inputs; rebuilding them while someone is typing loses the edit
+ if(wkEl.dataset.sig!==wsig && !editing(wkEl)) {
+  wkEl.dataset.sig=wsig;
+  wkEl.innerHTML=(wk.length?wk.map(x=>`<div class=row><span class=n>${String(x.i).padStart(2,'0')} ${ht(x.ops)}</span>`+
+   `<input value="${ht(x.screen)}" data-ws=${x.i} style=width:86px>`+
+   `<input value="${ht(x.label)}" data-wl=${x.i} style=flex:1>`+
+   `<button data-rmw=${x.i}>drop</button></div>`).join('')+
+   "<div class=n>The screen name ties the mask boxes to the seconds of that step; the label is the caption burned into the video. Re-render after editing.</div>"
+   :'<pre>no walk yet - scaffold one or replay a scout pass</pre>');}
  const live=document.getElementById('live'),err=document.getElementById('err');
  if(!live.dataset.on){live.dataset.on=1;live.src=u('/stream')}
  err.innerHTML=live.dataset.err?`<pre>${live.dataset.err}</pre>`:''}
@@ -503,6 +527,17 @@ if(mk)mk.onchange=e=>{const s=e.target.closest&&e.target.closest('select');if(!s
  fetch(u('/api/box',{op:'set',i:s.dataset.sc,screen:s.value}),{method:'POST'}).then(r=>r.json())
  .then(j=>{const n=document.getElementById('pkNote');if(n)n.textContent=j.error||('box now on '+j.scope+' - render again');tick();})
  .catch(()=>{tick();});};
+const wkPanel=document.getElementById('walk');
+if(wkPanel)wkPanel.onchange=e=>{const t=e.target,si=t.dataset.ws,li=t.dataset.wl;
+ if(si===undefined&&li===undefined)return;
+ const q={op:'set',i:si!==undefined?si:li};
+ if(si!==undefined)q.screen=t.value;else q.label=t.value;
+ post('/api/walk',q).then(x=>{note('step '+x.i+' saved - re-render to move the windows',1);tick();})
+  .catch(err=>note('walk edit failed: '+String(err).slice(0,120)));};
+if(wkPanel)wkPanel.onclick=e=>{const b=e.target.closest&&e.target.closest('button');
+ if(!b||!b.dataset.rmw)return;b.disabled=1;
+ post('/api/walk',{op:'rm',i:b.dataset.rmw}).then(x=>{note('step '+x.i+' dropped - re-render',1);tick();})
+  .catch(err=>{note('drop failed: '+String(err).slice(0,120));b.disabled=0;});};
 loadPick();setInterval(loadPick,20000);
 loadInputs();
 function ff(s){s=Math.max(0,s||0);return String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0')}
@@ -789,6 +824,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._render(root, name)
         if what == "box":
             return self._box(root, q)
+        if what == "walk":
+            return self._walk(root, q)
         return self._send(404, b"not found", "text/plain")
 
     def _json(self, code: int, obj: dict) -> None:
@@ -828,9 +865,12 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "screen": screen, "rect": [x, y, w, h],
                          "label": label, "mode": mode})
 
-    def _brand(self, root: Path, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, _adrd_path(), "brand", *args, "--session",
+    def _cli(self, root: Path, group: str, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, _adrd_path(), group, *args, "--session",
                                str(root)], capture_output=True, text=True)
+
+    def _brand(self, root: Path, *args: str) -> subprocess.CompletedProcess:
+        return self._cli(root, "brand", *args)
 
     def _box_index(self, root: Path, q: dict) -> int | None:
         """Validate ?i= against the boxes on disk, answering the request itself if it is
@@ -889,6 +929,40 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": (cp.stdout + cp.stderr).strip()[-300:]})
         self._json(200, {"ok": True, "i": i, "scope": screen, "rect": rect})
 
+    def _walk(self, root: Path, q: dict) -> None:
+        """Rename a step, re-tag which screen it lands on, or drop it. The screen name is
+        what ties a mask box to a stretch of the recording, so a leak fixed on the page
+        without this meant editing walk.json in an editor."""
+        steps = (read_json(root / "walk.json", {}) or {}).get("steps", [])
+        try:
+            i = int(q.get("i", [""])[0])
+        except ValueError:
+            return self._json(400, {"error": "i must be a step index"})
+        if not 0 <= i < len(steps):
+            return self._json(400, {"error": f"no step {i} - {len(steps)} in this walk"})
+        op = q.get("op", ["set"])[0]
+        args = ["--index", str(i)]
+        if op == "rm":
+            pass
+        elif op == "set":
+            screen = q.get("screen", [""])[0]
+            label = q.get("label", [""])[0][:80].replace("\n", " ")
+            if screen and not re.fullmatch(r"[A-Za-z0-9_:-]{1,64}", screen):
+                return self._json(400, {"error": "unknown screen name"})
+            if screen:
+                args += ["--screen", screen]
+            if label:
+                args += ["--label", label]
+            if len(args) == 2:
+                return self._json(400, {"error": "nothing to change"})
+        else:
+            return self._json(400, {"error": "op must be set or rm"})
+        cp = self._cli(root, "walk", op, *args)
+        if cp.returncode != 0:
+            return self._json(500, {"error": (cp.stdout + cp.stderr).strip()[-300:]})
+        self._json(200, {"ok": True, "i": i, "op": op,
+                         "out": (cp.stdout or "").strip().splitlines()[-1:]})
+
     def _picklist(self, root: Path) -> None:
         tl = read_json(root / "timeline.json", {}) or {}
         seen, out = set(), []
@@ -928,7 +1002,7 @@ class Handler(BaseHTTPRequestHandler):
         kept serving a video that no longer matched the boxes listed beside it."""
         if not (root / "timeline.json").is_file():
             return self._json(400, {"error": "nothing recorded yet - run the round first"})
-        self._start(root, name, False, ("render", "sweep", "doc", "export"))
+        self._start(root, name, False, ("retimeline", "render", "sweep", "doc", "export"))
 
     def _start(self, root: Path, name: str, raw: bool = False,
                only: tuple[str, ...] | None = None) -> None:
@@ -940,9 +1014,7 @@ class Handler(BaseHTTPRequestHandler):
                          args=(root, name, root / "inputs" / "app.apk", raw, only),
                          daemon=True).start()
         self._json(202, {"ok": True, "log": "inputs/run.log",
-                         "stages": list(only) if only else ["launch", "take", "brand",
-                                                            "render", "sweep", "doc",
-                                                            "export"],
+                         "stages": list(only or RUN_STAGES),
                          "export_includes_raw": raw})
 
     def _inputs(self, root: Path) -> None:
