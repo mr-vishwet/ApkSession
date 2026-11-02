@@ -262,6 +262,7 @@ PAGE = """<!doctype html><meta charset=utf-8><title>adrd</title>
 header{display:flex;gap:14px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--ln);flex-wrap:wrap}
 h1{font-size:16px;margin:0;font-weight:600}header span{color:var(--mut);font-size:12px}
 main{display:grid;grid-template-columns:minmax(280px,340px) 1fr;gap:20px;padding:20px;align-items:start}
+@media (max-width:820px){main{grid-template-columns:1fr;padding:14px}header{padding:12px 14px}}
 .stage{border:1px solid var(--ln);border-radius:10px;padding:14px;margin-bottom:14px}
 .stage h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 10px}
 .view{position:relative;background:#000;border-radius:10px;overflow:hidden;border:1px solid var(--ln)}
@@ -527,14 +528,39 @@ tick();setInterval(tick,1500);setInterval(draw,900);
 
 INDEX = """<!doctype html><meta charset=utf-8><title>adrd sessions</title>
 <style>body{background:#0e1116;color:#e6e9ef;font:14px/1.6 -apple-system,system-ui,sans-serif;margin:0;padding:24px}
-h1{font-size:16px}a{color:#5ac8fa;text-decoration:none}
+h1{font-size:16px}h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#8b94a3;margin:22px 0 6px}
+a{color:#5ac8fa;text-decoration:none}
+ol{margin:0;padding-left:20px;max-width:760px;color:#c8d0dc}li{margin:2px 0}
 table{border-collapse:collapse;width:100%;max-width:900px}td{padding:8px;border-top:1px solid #1e242e;vertical-align:top}
-td:first-child{color:#8b94a3;white-space:nowrap}.n{color:#8b94a3;font-size:12px}</style>
-<h1>Recording sessions</h1>
-<table><tr><td>session</td><td>app</td><td>stage</td><td>length</td><td>shareable</td></tr>
+.scroll{overflow-x:auto;max-width:100%}.scroll table{min-width:620px}
+tr:first-child td{color:#8b94a3;font-size:12px;border-top:none}
+td:first-child{color:#8b94a3;white-space:nowrap}.n{color:#8b94a3;font-size:12px}
+.ok{color:#34c759}.warn{color:#ff9f0a}</style>
+<h1>adrd - Android recording and de-branding rounds</h1>
+<p class=n>Each row is one round on one device. Open a session to upload the build, run the
+walk, watch the screen while it goes, and export the masked video.</p>
+<h2>How a round goes</h2>
+<ol>
+<li>Upload the <b>APK</b> under test (up to 200 MB) - it lands in the session, nothing is
+installed until you run.</li>
+<li>Upload the <b>brief</b> (.md, .txt, .xml or .pdf) describing the cases. Without one the
+tool builds its own cases from the routes it read out of the app source.</li>
+<li><b>Run</b> installs the build, cold-starts it, replays the walk while the screen is
+recorded, masks the client branding, burns in the chapter captions, writes the report and
+builds the export bundle.</li>
+<li>Watch the live device view and the stage strip while it runs, from anywhere the link
+opens.</li>
+<li>Read the report, check the sweep sheet with your own eyes, then download the bundle.
+Only the rendered video and the report are for sharing - the raw capture is unmasked.</li>
+</ol>
+<h2>Sessions</h2>
+<div class=scroll>
+<table><tr><td>session</td><td>app</td><td>apk</td><td>stage</td><td>length</td><td>shareable</td></tr>
 __ROWS__</table>
-<p class=n>Serve is bound to __HOST__. Live frames are unmasked client app content - a non-loopback
-bind requires the token in the URL.</p>"""
+</div>
+<p class=n>Bound to __HOST__. The token in this URL is the only access control, and app names
+appear in the list above, so treat the link as internal. Live frames are unmasked client
+content.</p>"""
 
 
 def _frame_size(root: Path) -> list[int]:
@@ -618,13 +644,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not (d / "state.json").exists():
                     continue
                 v = session_view(d)
+                apk = (d / "inputs" / "app.apk").is_file()
                 href = f"/s/{d.name}/?t={self.cfg['token']}"
                 rows.append(f"<tr><td><a href='{href}'>{v['session']}</a></td>"
-                            f"<td>{v['app'] or ''}</td><td>{v['stage']}</td>"
+                            f"<td>{v['app'] or ''}</td>"
+                            f"<td>{'<span class=ok>uploaded</span>' if apk else 'none'}</td>"
+                            f"<td>{v['stage']}</td>"
                             f"<td>{int(v['duration'] or 0)}s</td>"
                             f"<td>{'yes' if v['video_ready'] else 'not yet'}</td></tr>")
             html = (INDEX.replace("__ROWS__",
-                                  "\n".join(rows) or "<tr><td colspan=5>none yet</td></tr>")
+                                  "\n".join(rows) or "<tr><td colspan=6>none yet</td></tr>")
                     .replace("__HOST__", "127.0.0.1" if self.cfg["loopback"] else self.cfg["host"]))
             return self._send(200, html.encode(), "text/html; charset=utf-8")
         if parts and parts[0] == "s" and len(parts) >= 2:
