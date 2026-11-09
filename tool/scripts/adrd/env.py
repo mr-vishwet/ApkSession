@@ -78,10 +78,14 @@ def find_ffprobe() -> Path | None:
 
 
 def find_font() -> Path:
+    windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
     for p in (
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        windir / "Fonts/arial.ttf",
+        windir / "Fonts/segoeui.ttf",
+        windir / "Fonts/calibri.ttf",
     ):
         if Path(p).exists():
             return Path(p)

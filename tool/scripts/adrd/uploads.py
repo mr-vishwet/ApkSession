@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 MAX_APK = 200 * 1024 * 1024
@@ -37,6 +38,20 @@ class UploadError(ValueError):
 
 RUN_FILES = ("app.apk", "run.log", "run.json")
 # the run writes these into inputs/ itself; a brief must never be confused with them
+
+SCOPES = {
+    "focused": {
+        "label": "Focused",
+        "brief": "required",
+        "detail": "Only the steps written in the spec are tested. A spec is required.",
+    },
+    "full": {
+        "label": "Full app",
+        "brief": "optional",
+        "detail": "The spec steps run first, then every route the app exposes.",
+    },
+}
+DEFAULT_SCOPE = "focused"
 
 
 def spec(kind: str) -> dict:
@@ -146,44 +161,110 @@ def _brief_text(p: Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
-def build_cases(root: Path) -> dict:
-    """Cases come from the brief when there is one. With no brief the run falls back to
-    the screen inventory `flow` derived, so every known route still gets a check."""
+def _brief_cases(p: Path) -> tuple[list[dict], str]:
+    """A spec is read as headings plus list items. A prose or PDF spec with no list still
+    narrows the scope: each heading becomes one flow to check. A spec with neither is
+    refused instead of being turned into a confident empty run."""
+    text = _brief_text(p)
+    section, listed, headings = "", [], []
+    for line in text.splitlines():
+        h = _HEADING.match(line)
+        if h:
+            section = h.group(1).strip()
+            headings.append(section)
+            continue
+        m = _CASE_LINE.match(line)
+        if m and m.group(1).strip():
+            listed.append({"title": m.group(1).strip(), "section": section or "Spec",
+                           "from": "spec", "source": p.name})
+    if listed:
+        return listed, text
+    flows = headings[1:] if len(headings) > 1 else headings
+    titled = [{"title": h, "section": "Spec", "from": "spec", "source": p.name}
+              for h in flows]
+    if not titled:
+        raise UploadError(
+            "the spec has no test steps: add one list item per check, or one heading "
+            "per flow", 400)
+    return titled, text
+
+
+def _flow_cases(root: Path, mentioned: str = "") -> list[dict]:
+    """Every route the static scan found, minus the ones the spec already mentions.
+    That is what makes Full scope additive rather than a duplicate of the spec."""
+    flow = read_json(root / "flow_map.json", {}) or {}
+    blob = mentioned.casefold()
+    seen, out = set(), []
+    for route in flow.get("routes", []):
+        if isinstance(route, str):
+            name, module = route, ""
+        else:
+            name = route.get("name") or route.get("route") or ""
+            module = str(route.get("module", ""))
+        if not name or name in seen:
+            continue
+        if blob and (name.casefold() in blob or
+                     (len(module) > 2 and module.casefold() in blob)):
+            continue
+        seen.add(name)
+        out.append({"title": f"Reach {name} and check it renders",
+                    "section": module or "Whole app", "from": "flow",
+                    "source": "flow_map.json"})
+    return out
+
+
+def build_cases(root: Path, scope: str | None = None) -> dict:
+    """Focused tests the spec and nothing else, so it demands one. Full tests the spec
+    first and then the rest of the app inventory, so the spec is optional there."""
+    scope = scope or read_scope(root)
+    if scope not in SCOPES:
+        raise UploadError(f"scope must be one of {sorted(SCOPES)}")
     briefs = _brief_files(root)
-    origin, cases = "brief", []
+    brief_cases: list[dict] = []
+    spec_text = ""
     if briefs:
-        text = _brief_text(briefs[-1])
-        section = ""
-        for line in text.splitlines():
-            h = _HEADING.match(line)
-            if h:
-                section = h.group(1).strip()
-                continue
-            m = _CASE_LINE.match(line)
-            if m:
-                title = m.group(1).strip()
-                if title:
-                    cases.append({"title": title, "section": section,
-                                  "source": briefs[-1].name})
-    else:
-        origin = "flow"
-        flow = read_json(root / "flow_map.json", {}) or {}
-        for route in flow.get("routes", []):
-            name = route if isinstance(route, str) else (route.get("name") or route.get("route") or "")
-            if name:
-                cases.append({"title": f"Reach {name} and check it renders",
-                              "section": str(route.get("module", "")) if isinstance(route, dict) else "",
-                              "source": "flow_map.json"})
+        brief_cases, spec_text = _brief_cases(briefs[-1])
+    elif scope == "focused":
+        raise UploadError(
+            "Focused scope needs a spec. Upload a .md, .pdf or .txt with the steps to "
+            "check, or switch to Full app.", 400)
+    flow_cases = _flow_cases(root, spec_text if scope == "full" else "")
+    cases = brief_cases + (flow_cases if scope == "full" else [])
+    warning = None
+    if not cases:
+        # Full scope on an APK-only session has nothing statically scanned yet; the walk
+        # the session already holds is still a real run, so this is stated, not blocked.
+        warning = ("no flow inventory in this session: this run follows the walk it "
+                   "already has, with no case list")
+    origin = ("mixed" if brief_cases and flow_cases
+              else "brief" if brief_cases else "flow")
     numbered = [{"id": f"C{i + 1:02d}", **c} for i, c in enumerate(cases)]
+    counts = {"from_spec": len(brief_cases),
+              "from_flow": len(flow_cases) if scope == "full" else 0}
+    sections = list(dict.fromkeys(c.get("section") or "Spec" for c in numbered))
+    record = {"scope": scope, "origin": origin, "count": len(numbered),
+              "counts": counts, "spec": briefs[-1].name if briefs else None,
+              "sections": sections, "cases": numbered}
+    if warning:
+        record["warning"] = warning
     (root / "inputs").mkdir(parents=True, exist_ok=True)
-    (root / "cases.json").write_text(json.dumps({"origin": origin, "cases": numbered},
-                                                indent=2) + "\n", encoding="utf-8")
-    lines = [f"# Test cases ({origin})", ""]
+    (root / "cases.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    lines = [f"# Test cases ({scope})", "",
+             f"Scope: {SCOPES[scope]['label']} - {SCOPES[scope]['detail']}",
+             f"Cases: {counts['from_spec']} from the spec, "
+             f"{counts['from_flow']} beyond it.", ""]
+    if warning:
+        lines.append(f"_{warning}_")
+    current = None
     for c in numbered:
-        where = f" _{c['section']}_" if c.get("section") else ""
-        lines.append(f"- [ ] **{c['id']}** {c['title']}{where}")
+        if c.get("section") != current:
+            current = c.get("section")
+            lines += [f"## {current}", ""]
+        extra = " _(beyond the spec)_" if c.get("from") == "flow" else ""
+        lines.append(f"- [ ] **{c['id']}** {c['title']}{extra}")
     (root / "CASES.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"origin": origin, "count": len(numbered),
+    return {"origin": origin, "scope": scope, "count": len(numbered),
+            "counts": counts, "warning": warning,
             "cases": "cases.json", "markdown": "CASES.md"}
 
 
@@ -192,3 +273,17 @@ def read_json(path: Path, default=None):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
+
+
+def read_scope(root: Path) -> str:
+    name = (read_json(root / "scope.json", {}) or {}).get("scope")
+    return name if name in SCOPES else DEFAULT_SCOPE
+
+
+def write_scope(root: Path, name: str) -> str:
+    if name not in SCOPES:
+        raise UploadError(f"scope must be one of {sorted(SCOPES)}")
+    (root / "scope.json").write_text(json.dumps({"scope": name,
+                                                 "updated": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                                indent=2) + "\n", encoding="utf-8")
+    return name

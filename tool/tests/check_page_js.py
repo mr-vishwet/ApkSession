@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Bracket-balance the dashboard's inline script.
+"""Bracket-balance the dashboard's inline scripts.
 
-The HTML lives inside a Python string, so no browser is around to complain when an edit
+The HTML lives in template files, so no browser is around to complain when an edit
 leaves an orphan ')' - and a page with a parse error looks identical to a page that is
-merely idle. This catches it without a browser.
+merely idle. This catches it without a browser, for both the operator console and the
+read-only live page.
 """
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from adrd.watch import PAGE  # noqa: E402
+from adrd.watch import LIVE, PAGE  # noqa: E402
 
 PAIRS = {"(": ")", "[": "]", "{": "}"}
 
@@ -69,12 +70,13 @@ def unbalanced(src: str) -> str | None:
 
 
 def main() -> int:
-    src = PAGE.split("<script>")[1].split("</script>")[0]
-    bad = unbalanced(src)
-    if bad:
-        print(f"dashboard script is broken: {bad} - the browser will not run it")
-        return 1
-    print("  ok   dashboard inline script balances")
+    for label, doc in (("dashboard", PAGE), ("live page", LIVE)):
+        src = doc.split("<script>")[1].split("</script>")[0]
+        bad = unbalanced(src)
+        if bad:
+            print(f"{label} script is broken: {bad} - the browser will not run it")
+            return 1
+        print(f"  ok   {label} inline script balances")
     return 0
 
 

@@ -29,3 +29,6 @@ __pycache__/
 # Verified: `git add -A` would have staged 546 such files, 42 MB.
 sessions/
 *.fig
+
+# local mac venv kept for reference, never part of the repo
+.venv.macos-backup/

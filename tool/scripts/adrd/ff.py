@@ -124,6 +124,21 @@ def concat(parts: list[Path], out: Path) -> Path:
     return out
 
 
+def clip(video: Path, out: Path, start: float, seconds: float, crf: int = 20,
+         preset: str = "veryfast") -> Path:
+    """Cut one section out of the finished file. Re-encoded, not stream-copied: a copy
+    snaps to the previous keyframe and lands seconds before the chapter it names."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    run([_exe("ffmpeg"), "-hide_banner", "-ss", f"{max(0.0, start):.3f}", "-i", video,
+         "-t", f"{max(0.0, seconds):.3f}", "-c:v", "libx264", "-preset", preset,
+         "-crf", str(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+         "-an", "-y", out], timeout=3600)
+    got = duration(out)
+    if got < seconds * 0.9:
+        raise FFError(f"{out.name} is {got:.2f}s of the {seconds:.2f}s requested")
+    return out
+
+
 def frame(video: Path, at: float, out: Path | str, height: int | None = None) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +220,16 @@ def _region_chain(label: str, nxt: str, r: Rect, mode: str, sigma: float,
     ]
 
 
+def _filter_path(p: Path | str) -> str:
+    """A filtergraph value that survives the option parser on every platform. A Windows
+    drive letter is a colon to ffmpeg, so the path is quoted and the colon escaped; the
+    same applies to any absolute path that happens to contain one."""
+    s = str(p).replace("\\", "/")
+    if ":" in s or " " in s:
+        return "'" + s.replace(":", r"\:") + "'"
+    return s
+
+
 def _drawtext(cap: dict, W: int, H: int, position: str) -> str:
     fs = int(cap.get("fontsize") or max(18, H * 0.026))
     x = int(cap.get("x", W * 0.025))
@@ -214,11 +239,11 @@ def _drawtext(cap: dict, W: int, H: int, position: str) -> str:
     if "expr" in cap:
         text = f"text='{cap['expr']}'"
     elif cap.get("textfile"):
-        text = f"textfile={cap['textfile']}"
+        text = f"textfile={_filter_path(cap['textfile'])}"
     else:
         text = f"text='{esc(cap.get('text', ''))}'"
     body = (
-        f"drawtext=fontfile={find_font()}:{text}:fontsize={fs}"
+        f"drawtext=fontfile={_filter_path(find_font())}:{text}:fontsize={fs}"
         f":fontcolor={cap.get('fontcolor', 'white')}"
         f":box=1:boxcolor={cap.get('boxcolor', 'black@0.62')}"
         f":boxborderw={max(6, int(fs * 0.4))}:x={x}:y={int(y)}"
@@ -284,7 +309,8 @@ def render(video: Path, out: Path, graph: str | tuple, chapters: list[dict] | No
         meta = out.with_name("chapters.ffmetadata")
         meta.write_text(ffmetadata(chapters))
         args += ["-i", meta]
-    args += ["-filter_complex_script", script, "-map", f"[{label}]"]
+    # ffmpeg 9 dropped -filter_complex_script; the inline form is the portable one.
+    args += ["-filter_complex", graph, "-map", f"[{label}]"]
     if chapters:
         args += ["-map_chapters", "1"]
     if fps:

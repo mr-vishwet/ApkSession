@@ -12,7 +12,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from . import docgen, export as X, ff, flowmap, render as R, timeline as T
+from . import docgen, export as X, ff, flowmap, render as R, sections as SEC, timeline as T
 from .adb import Adb, Recorder
 from .env import doctor, find_flutter, list_serials
 from .img import annotate, contact_sheet
@@ -621,6 +621,22 @@ def cmd_render(a) -> int:
     return 0
 
 
+def cmd_sections(a) -> int:
+    s = Session(a.session)
+    try:
+        m = SEC.build(s.root)
+    except FileNotFoundError as e:
+        print(f"sections skipped: {e}", file=sys.stderr)
+        return 1
+    print(f"wrote {s.render / SEC.MANIFEST}")
+    print(f"{m['count']} section(s), {m['total_duration']}s of "
+          f"{m['source_duration']}s in the full video")
+    for it in m["sections"]:
+        print(f"  {it['file']}  {it['t0']:.1f}-{it['t1']:.1f}s  "
+              f"{it['duration']:.1f}s  {it['bytes'] // 1024} KB")
+    return 0
+
+
 def cmd_sweep(a) -> int:
     """Full frames from the finished video, one sheet per pass - the only check that can
     see branding sitting outside the boxes you declared."""
@@ -932,6 +948,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--preset", default="veryfast")
     watch_flags(r)
     r.set_defaults(fn=cmd_render)
+
+    sx = sub.add_parser("sections", help="cut one clip per chapter from the masked video")
+    sx.add_argument("--session", required=True)
+    sx.set_defaults(fn=cmd_sections)
 
     sw = sub.add_parser("sweep", help="full-frame sheet of the render for human review")
     sw.add_argument("--session", required=True)

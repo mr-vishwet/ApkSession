@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>adrd - session</title>
+<style>
+{{CSS}}
+</style>
+</head>
+<body>
+<header class="slate">
+  <a class="brand" href="/"><i></i>adrd<small>session</small></a>
+  <div class="crumb"><b id="app" role="heading" aria-level="1">loading</b><span id="meta"></span></div>
+  <div class="end">
+    <span class="pill" id="stage">connecting</span>
+    <button class="btn small" id="reRender" hidden>Re-render</button>
+    <button class="btn small" id="ex">Export bundle</button>
+    <a class="btn small quiet" href="/">All sessions</a>
+  </div>
+</header>
+
+<div class="shell">
+  <div class="strip" id="strip" aria-label="Run stages"></div>
+
+  <main>
+    <div class="col">
+
+      <section class="panel" aria-labelledby="call-h">
+        <header><h2 id="call-h">Call sheet</h2><span class="sub" id="call-sub">build + spec</span></header>
+
+        <div class="scope" role="radiogroup" aria-label="Test scope">
+          <label class="scope-opt">
+            <input type="radio" name="scope" value="focused" checked>
+            <b>Focused</b>
+            <span>Spec required. Test only the steps it names.</span>
+          </label>
+          <label class="scope-opt">
+            <input type="radio" name="scope" value="full">
+            <b>Full app</b>
+            <span>Spec optional. Spec steps first, then every route found in the app.</span>
+          </label>
+        </div>
+
+        <dl class="facts" id="facts">
+          <dt>APK</dt><dd class="n">checking...</dd>
+          <dt>Spec</dt><dd class="n">checking...</dd>
+          <dt>Cases</dt><dd class="n">checking...</dd>
+          <dt>Run</dt><dd class="n">checking...</dd>
+        </dl>
+
+        <div class="file">
+          <label for="fApk">APK</label>
+          <input type="file" id="fApk" accept=".apk">
+          <button class="btn small" id="bApk">Upload APK</button>
+        </div>
+        <div class="file">
+          <label for="fBrief">Spec</label>
+          <input type="file" id="fBrief" accept=".md,.markdown,.txt,.xml,.pdf">
+          <button class="btn small" id="bBrief">Upload spec</button>
+        </div>
+
+        <label class="check">
+          <input type="checkbox" id="raw">
+          <span>Include the unmasked capture in the export bundle. Leave this off unless you own the screen.</span>
+        </label>
+
+        <div class="row">
+          <button class="btn small" id="bCases">Build test cases</button>
+          <button class="btn primary" id="bRun">Start run</button>
+        </div>
+        <div id="inote" role="status" aria-live="polite"></div>
+
+        <details class="log">
+          <summary>Run log</summary>
+          <pre id="ilog">nothing logged yet</pre>
+        </details>
+      </section>
+
+      <section class="panel" aria-labelledby="share-h">
+        <header><h2 id="share-h">Share</h2><span class="pill" id="smtp">checking</span></header>
+        <p class="n">A live link opens read-only: the masked master, the section cuts and the
+          report. The unmasked capture is never served through it.</p>
+        <div id="shareBody">
+          <div class="share-link">
+            <input id="shareUrl" readonly aria-label="Live link" placeholder="no link yet">
+            <button class="btn small" id="bShare">Create link</button>
+            <button class="btn small" id="bCopy" hidden>Copy</button>
+          </div>
+          <div class="mail">
+            <input id="shareEmail" type="email" autocomplete="email" aria-label="Email for the live link"
+              placeholder="name@company.com">
+            <button class="btn small" id="bMail">Email me the link</button>
+          </div>
+          <div id="shareNote" class="n" role="status" aria-live="polite"></div>
+        </div>
+        <ol class="events" id="events" aria-label="Recent share events"></ol>
+      </section>
+
+    </div>
+
+    <div class="col">
+
+      <section class="panel" aria-labelledby="take-h">
+        <header><h2 id="take-h">Take</h2>
+          <div class="row">
+            <span class="sub" id="take-sub"></span>
+            <label class="seg" style="font-size:11px"><input type="checkbox" id="mt" checked> Mask overlay</label>
+          </div>
+        </header>
+        <div class="take">
+          <div>
+            <div class="frame" id="v">
+              <img id="live" alt="Live device screen" hidden>
+              <span class="frame-tag">unmasked preview</span>
+            </div>
+            <div id="err" class="errbox" role="status"></div>
+          </div>
+          <div class="readout">
+            <div class="now">
+              <b id="nowTitle">nothing running</b>
+              <span id="nowSub">start a run from the call sheet</span>
+            </div>
+            <div class="bar" aria-hidden="true"><i id="pb"></i></div>
+            <div class="mono-n" id="pct"></div>
+            <div class="rail" id="rail"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="rush-h">
+        <header>
+          <h2 id="rush-h">Rushes</h2>
+          <div class="row">
+            <span class="sub" id="rush-sub"></span>
+            <label class="sr" for="sort">Sort cuts</label>
+            <select id="sort">
+              <option value="order">Scene order</option>
+              <option value="longest">Longest first</option>
+              <option value="shortest">Shortest first</option>
+              <option value="name">By name</option>
+            </select>
+          </div>
+        </header>
+        <div class="rushes" id="rushes"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="master-h">
+        <header>
+          <h2 id="master-h">Master cut</h2>
+          <div class="seg" role="radiogroup" aria-label="Video version">
+            <label><input type="radio" name="v" checked id="vMask"> Masked</label>
+            <label><input type="radio" name="v" id="vRaw"> Unmasked</label>
+          </div>
+        </header>
+        <video id="vid" controls playsinline preload="metadata"></video>
+        <div class="mono-n" id="vinfo">not built yet</div>
+      </section>
+
+      <div class="two">
+        <section class="panel" aria-labelledby="steps-h">
+          <header><h2 id="steps-h">Steps</h2><span class="sub" id="steps-sub"></span></header>
+          <div class="steps" id="steps"></div>
+        </section>
+        <section class="panel" aria-labelledby="walk-h">
+          <header><h2 id="walk-h">Walk</h2><span class="sub">screen name + caption</span></header>
+          <div id="walk"></div>
+        </section>
+      </div>
+
+      <div class="two">
+        <section class="panel" aria-labelledby="mask-h">
+          <header><h2 id="mask-h">Masks</h2><span class="sub" id="mask-sub"></span></header>
+          <div id="mask"></div>
+        </section>
+        <section class="panel" aria-labelledby="pick-h">
+          <header><h2 id="pick-h">Mask picker</h2><span class="sub">drag on the still</span></header>
+          <div class="row" style="margin-bottom:10px">
+            <label class="sr" for="pkSel">Still</label>
+            <select id="pkSel" class="grow"></select>
+          </div>
+          <div class="picker" id="pkWrap">
+            <img id="pkImg" alt="Screen still for placing mask boxes" hidden>
+            <div class="newbox" id="pkBox"></div>
+            <div class="oldbox" id="pkOld"></div>
+          </div>
+          <div class="pick-tools">
+            <div class="row">
+              <label class="sr" for="pkLabel">Box label</label>
+              <input id="pkLabel" value="brand mark" aria-label="Box label">
+              <label class="sr" for="pkMode">Mask style</label>
+              <select id="pkMode">
+                <option>solid</option>
+                <option>pixelate</option>
+                <option>blur</option>
+              </select>
+            </div>
+            <div class="row">
+              <button class="btn small" id="pkAdd">Add mask box</button>
+              <span id="pkNote" class="n" role="status" aria-live="polite"></span>
+            </div>
+            <p class="n">Drag across the brand mark in the frame. Existing boxes can be dragged
+              to a new position. Re-render after changing a box.</p>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel files" aria-labelledby="files-h">
+        <header>
+          <h2 id="files-h">Files</h2>
+          <div class="row">
+            <span class="sub">masked unless marked</span>
+            <a class="btn small" id="allimg" href="#">Download stills</a>
+          </div>
+        </header>
+        <div id="arts"></div>
+        <details class="log">
+          <summary>Evidence stills</summary>
+          <div class="evi" id="evi"></div>
+        </details>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<dialog class="player" id="player">
+  <div class="head"><b id="plTitle">Section</b><button class="btn small quiet" id="plClose">Close</button></div>
+  <video id="plVid" controls playsinline></video>
+  <div class="n" id="plNote"></div>
+</dialog>
+
+<script>
+{{JS}}
+</script>
+</body>
+</html>

@@ -59,6 +59,7 @@ def readme(session, tl: dict, st: dict, brief: str, include_raw: bool) -> str:
         "",
         "FILES",
         "  video/demo_debranded.mp4   the shareable recording, chapters embedded",
+        "  video/sections/            one masked clip per chapter",
         "  video/chapters.vtt         chapter list with timecodes for any player",
         "  SESSION_DOC.md             what happens at every timestamp",
         "  FLOW_MAP.md                routes and modules read from the source",
@@ -126,6 +127,12 @@ def build(session, brief_text: str = "", brief_file: str | None = None,
 
     keep(session.path("final"), "video/demo_debranded.mp4")
     keep(session.path("vtt"), "video/chapters.vtt")
+    sections = session.read("sections", {"sections": []}) or {"sections": []}
+    for item in sections.get("sections", []):
+        src = session.root / item["file"]
+        keep(src, f"video/sections/{src.name}")
+    if sections.get("sections"):
+        keep(session.path("sections"), "video/sections.json")
     keep(session.path("doc"), "SESSION_DOC.md")
     keep(session.path("report"), "SESSION_DOC.pdf")
     keep(session.path("flow").with_name("FLOW_MAP.md"), "FLOW_MAP.md")

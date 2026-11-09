@@ -61,6 +61,10 @@ def upload(port, kind, name, body):
     return req(port, "POST", f"/s/alpha/api/upload?t={TOKEN}&kind={kind}&name={name}", body)
 
 
+def full_scope(port):
+    return req(port, "POST", f"/s/alpha/api/scope?t={TOKEN}&scope=full")
+
+
 # ---- uploads land, and land only inside the session ------------------------------
 
 def test_apk_upload_is_stored_and_listed(server):
@@ -240,7 +244,7 @@ def test_editing_a_box_marks_the_video_stale_and_offers_the_repair(server, monke
     watch.RUNS.clear()
 
     code, out = req(port, "POST", f"/s/alpha/api/render?t={TOKEN}")
-    assert code == 202 and out["stages"] == ["retimeline", "render", "sweep", "doc",
+    assert code == 202 and out["stages"] == ["retimeline", "render", "sections", "sweep", "doc",
                                     "export"], out
     assert out["export_includes_raw"] is False, "a repair must not start shipping the raw capture"
     run = None
@@ -251,8 +255,8 @@ def test_editing_a_box_marks_the_video_stale_and_offers_the_repair(server, monke
                 break
         time.sleep(0.05)
     assert run, "the re-render never wrote its stage record"
-    assert [h["name"] for h in run["stages"]] == ["retimeline", "render", "sweep", "doc",
-                                           "export"]
+    assert [h["name"] for h in run["stages"]] == ["retimeline", "render", "sections",
+                                           "sweep", "doc", "export"]
     assert all(h["state"] == "ok" for h in run["stages"]), run
 
     os.utime(vid, (now + 5, now + 5))
@@ -383,6 +387,8 @@ def test_the_raw_capture_stays_on_the_machine_once_the_door_is_public(tmp_path):
         own.shutdown_all()
 
 
+@pytest.mark.skipif(__import__("os").name == "nt",
+                    reason="the stub cloudflared is a POSIX shell script")
 def test_a_named_tunnel_hands_back_the_same_url_after_a_restart(tmp_path, monkeypatch):
     """The bookmarkable URL is the one requirement that cannot be shown with a quick
     tunnel, so drive the real named-tunnel path against a stub cloudflared: the create,
@@ -526,14 +532,72 @@ def test_brief_produces_numbered_cases(server):
     assert all(c["section"] == "Step 1 postcode" for c in parsed["cases"])
 
 
-def test_no_brief_falls_back_to_the_flow_inventory(server):
+def test_no_brief_falls_back_to_the_flow_inventory_in_full_scope(server):
     port, alpha = server
     (alpha / "flow_map.json").write_text(json.dumps(
         {"routes": [{"name": "find_support", "module": "flow"},
                     {"name": "profile", "module": "protected"}]}))
+    code, out = req(port, "POST", f"/s/alpha/api/scope?t={TOKEN}&scope=full")
+    assert code == 200 and out["scope"] == "full", out
     code, cases = req(port, "POST", f"/s/alpha/api/cases?t={TOKEN}")
     assert code == 200 and cases["origin"] == "flow" and cases["count"] == 2
     assert "Reach find_support" in (alpha / "CASES.md").read_text()
+
+
+def test_focused_scope_refuses_to_build_without_a_spec(server):
+    port, alpha = server
+    (alpha / "flow_map.json").write_text(json.dumps(
+        {"routes": [{"name": "find_support", "module": "flow"}]}))
+    code, out = req(port, "POST", f"/s/alpha/api/cases?t={TOKEN}")
+    assert code == 400 and "Focused scope needs a spec" in out["error"], out
+    assert not (alpha / "cases.json").exists()
+
+
+def test_focused_scope_tests_only_the_spec(server):
+    port, alpha = server
+    (alpha / "flow_map.json").write_text(json.dumps(
+        {"routes": [{"name": "postcode", "module": "flow"},
+                    {"name": "profile", "module": "protected"}]}))
+    upload(port, "brief", "cases.md", BRIEF)
+    code, cases = req(port, "POST", f"/s/alpha/api/cases?t={TOKEN}")
+    assert code == 200 and cases["scope"] == "focused", cases
+    assert cases["count"] == 3 and cases["counts"] == {"from_spec": 3, "from_flow": 0}
+    parsed = json.loads((alpha / "cases.json").read_text())
+    assert all(c["from"] == "spec" for c in parsed["cases"])
+    assert "profile" not in (alpha / "CASES.md").read_text()
+
+
+def test_full_scope_runs_the_spec_first_then_the_unmentioned_routes(server):
+    port, alpha = server
+    (alpha / "flow_map.json").write_text(json.dumps(
+        {"routes": [{"name": "postcode", "module": "flow"},
+                    {"name": "profile", "module": "protected"}]}))
+    upload(port, "brief", "cases.md", BRIEF)
+    req(port, "POST", f"/s/alpha/api/scope?t={TOKEN}&scope=full")
+    code, cases = req(port, "POST", f"/s/alpha/api/cases?t={TOKEN}")
+    assert code == 200 and cases["origin"] == "mixed", cases
+    assert cases["counts"] == {"from_spec": 3, "from_flow": 1}
+    parsed = json.loads((alpha / "cases.json").read_text())
+    assert [c["from"] for c in parsed["cases"]] == ["spec", "spec", "spec", "flow"]
+    assert parsed["cases"][-1]["title"] == "Reach profile and check it renders"
+
+
+def test_switching_scope_marks_the_existing_cases_stale(server):
+    port, alpha = server
+    upload(port, "brief", "cases.md", BRIEF)
+    req(port, "POST", f"/s/alpha/api/cases?t={TOKEN}")
+    req(port, "POST", f"/s/alpha/api/scope?t={TOKEN}&scope=full")
+    code, listing = req(port, "GET", f"/s/alpha/api/inputs?t={TOKEN}")
+    assert code == 200 and listing["scope"]["name"] == "full"
+    assert listing["cases"]["stale"] is True, listing["cases"]
+
+
+def test_run_refuses_focused_scope_without_a_spec(server):
+    port, alpha = server
+    upload(port, "apk", "app.apk", APK)
+    code, out = req(port, "POST", f"/s/alpha/api/run?t={TOKEN}")
+    assert code == 400 and "Focused scope needs a spec" in out["error"], out
+    assert not watch.RUNS.get("alpha", {}).get("alive")
 
 
 def test_pdf_brief_reports_the_missing_dependency_instead_of_inventing_text(tmp_path):
@@ -570,6 +634,7 @@ def test_run_starts_and_refuses_a_second_one(server, monkeypatch):
 
     monkeypatch.setattr(watch, "_run_stages", fake_stages)
     upload(port, "apk", "app.apk", APK)
+    full_scope(port)
     code, out = req(port, "POST", f"/s/alpha/api/run?t={TOKEN}")
     assert code == 202 and out["ok"]
     assert started.wait(5)
@@ -592,6 +657,7 @@ def test_a_crashing_stage_runner_frees_the_session_for_the_next_run(server, monk
     so every later run got 409 until the dashboard was restarted."""
     port, alpha = server
     upload(port, "apk", "app.apk", APK)
+    full_scope(port)
 
     def crash(root, name, apk, raw=False, only=None):
         raise RuntimeError("stage runner died")
@@ -616,6 +682,7 @@ def test_export_excludes_the_unmasked_capture_unless_the_run_asks(server, monkey
 
     port, alpha = server
     upload(port, "apk", "app.apk", APK)
+    full_scope(port)
 
     def record(cmd, *a, **k):
         recorded.append(list(cmd))
@@ -756,8 +823,8 @@ def test_the_run_records_every_stage_so_the_page_can_show_the_pipeline(tmp_path,
 
     run = json.loads((root / "inputs" / "run.json").read_text())
     names = [h["name"] for h in run["stages"]]
-    assert names == ["launch", "take", "brand", "retimeline", "render", "sweep", "doc",
-                "export"], names
+    assert names == ["launch", "take", "brand", "retimeline", "render", "sections", "sweep",
+                "doc", "export"], names
     states = {h["name"]: h["state"] for h in run["stages"]}
     assert states["launch"] == "ok" and states["render"] == "ok"
     assert states["sweep"] == "failed", states

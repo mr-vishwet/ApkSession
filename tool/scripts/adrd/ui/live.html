@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>adrd - live session</title>
+<style>
+{{CSS}}
+</style>
+</head>
+<body>
+<header class="slate">
+  <span class="brand"><i></i>adrd<small>live</small></span>
+  <div class="crumb"><b id="app">loading</b><span id="meta"></span></div>
+  <div class="end"><span class="pill" id="stage">connecting</span></div>
+</header>
+
+<div class="shell">
+  <main class="live-main">
+    <div>
+      <div class="stagebox">
+        <video id="vid" controls playsinline preload="metadata" hidden></video>
+        <img id="live" alt="Live device screen" hidden>
+      </div>
+      <div class="headline">
+        <h1 id="title">Live session</h1>
+        <span id="feedNote">live device feed</span>
+      </div>
+      <div class="bar" aria-hidden="true"><i id="pb"></i></div>
+      <div class="mono-n" id="pct">waiting for the run</div>
+
+      <div class="telemetry">
+        <div>state<b id="stateText">-</b></div>
+        <div>length<b id="len">-</b></div>
+        <div>cuts<b id="cutCount">-</b></div>
+        <div>updated<b id="updated">-</b></div>
+      </div>
+
+      <section class="panel" aria-labelledby="cuts-h">
+        <header><h2 id="cuts-h">Section cuts</h2><span class="sub" id="cuts-sub"></span></header>
+        <div class="cuts" id="cuts">
+          <div class="empty">Section cuts appear here as the run is rendered.</div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="chap-h">
+        <header><h2 id="chap-h">Chapters</h2><span class="sub">click one to jump in the master</span></header>
+        <div class="rail" id="rail"></div>
+      </section>
+    </div>
+
+    <aside>
+      <section class="follow" aria-labelledby="follow-h">
+        <h2 id="follow-h">Follow this session</h2>
+        <p>Leave an email and you will be told when a run starts, and again when the masked
+          results are ready. The link stays the same.</p>
+        <form id="subForm">
+          <label class="sr" for="email">Email address</label>
+          <input id="email" type="email" autocomplete="email" placeholder="name@company.com" required>
+          <button class="btn primary" type="submit" id="bSub">Email me the updates</button>
+        </form>
+        <div class="n" id="subNote" role="status" aria-live="polite"></div>
+        <div class="delivery"><span id="smtpDot">·</span><span id="smtpText">delivery not configured</span></div>
+      </section>
+
+      <section class="panel" aria-labelledby="dl-h">
+        <header><h2 id="dl-h">Results</h2></header>
+        <div class="downloads" id="downloads">
+          <span class="n">Nothing to download yet.</span>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="ev-h">
+        <header><h2 id="ev-h">Activity</h2></header>
+        <ol class="events" id="events"></ol>
+      </section>
+    </aside>
+  </main>
+</div>
+
+<dialog class="player" id="player">
+  <div class="head"><b id="plTitle">Section</b><button class="btn small quiet" id="plClose">Close</button></div>
+  <video id="plVid" controls playsinline></video>
+</dialog>
+
+<script>
+{{JS}}
+</script>
+</body>
+</html>

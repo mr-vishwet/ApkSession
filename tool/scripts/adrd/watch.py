@@ -23,18 +23,19 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import ff
 from . import ingest as IN
+from . import share as SH
 from . import uploads as UP
 from .env import cf_cert, cf_dir
 from .session import Session
 
 BOUNDARY = "adrdframe"
 RAW_MARK = "recording"
-ARTIFACTS = [("final", "shareable video"), ("vtt", "chapters"), ("doc", "session doc"),
-             ("report", "A4 report"),
+ARTIFACTS = [("final", "shareable video"), ("sections", "section clips"),
+             ("vtt", "chapters"), ("doc", "session doc"), ("report", "A4 report"),
              ("recording", "raw capture (unmasked)"), ("sheet", "screen sheet"),
              ("proof", "region proof"), ("bundle", "final export bundle")]
-RUN_STAGES = ("launch", "take", "brand", "retimeline", "render", "sweep", "doc",
-            "export")
+RUN_STAGES = ("launch", "take", "brand", "retimeline", "render", "sections", "sweep",
+            "doc", "export")
 LIVE_TTL = 45.0  # a status file this old means nothing is running
 
 RUN_LOCK = threading.Lock()
@@ -51,18 +52,34 @@ def _adrd_path() -> str:
 
 
 def _run_guarded(root: Path, name: str, apk: Path, raw: bool = False,
-                 only: tuple[str, ...] | None = None) -> None:
+                 only: tuple[str, ...] | None = None, base: str = "") -> None:
     """Whatever happens to the stages, the session must stop being marked as running -
-    otherwise one failed launch locks that session out of every later run."""
+    otherwise one failed launch locks that session out of every later run. The same
+    moment is the only honest place to send the finished (or failed) trigger."""
+    ok = False
     try:
-        _run_stages(root, name, apk, raw, only)
+        ok = _run_stages(root, name, apk, raw, only) is not False
+    except Exception as exc:
+        # this runs in a thread, so an uncaught error would die there with no record
+        # the console can show; leave the reason where the run log lives
+        try:
+            with (root / "inputs" / "run.log").open("a", encoding="utf-8") as lf:
+                lf.write(f"== runner ==\nrunner crashed: {exc!r}\n")
+            write_status(root, stage=f"runner: {exc}")
+        except Exception:
+            pass
     finally:
         with RUN_LOCK:
             RUNS.pop(name, None)
+        try:
+            SH.notify(root, "completed" if ok else "failed", base=base,
+                      kind="render" if only is not None else "run")
+        except Exception:
+            pass
 
 
 def _run_stages(root: Path, name: str, apk: Path, raw: bool = False,
-                only: tuple[str, ...] | None = None) -> None:
+                only: tuple[str, ...] | None = None) -> bool:
     """Run launch -> take -> render -> sweep -> doc -> export, one stage at a
     time, writing each stage to status.json and appending output to
     inputs/run.log so the dashboard can show progress. `only` narrows the plan for a
@@ -80,6 +97,7 @@ def _run_stages(root: Path, name: str, apk: Path, raw: bool = False,
         # re-tag made after the take is honoured by the very next render
         ("retimeline", [py, adrd, "retimeline", "--session", str(root)]),
         ("render", [py, adrd, "render", "--session", str(root), "--step-captions"]),
+        ("sections", [py, adrd, "sections", "--session", str(root)]),
         ("sweep", [py, adrd, "sweep", "--session", str(root)]),
         ("doc", [py, adrd, "doc", "--session", str(root)]),
         # the bundle excludes the unmasked capture unless the caller asked for it by name
@@ -118,7 +136,7 @@ def _run_stages(root: Path, name: str, apk: Path, raw: bool = False,
                 lf.write(f"{stage} raised: {exc}\n")
             write_status(root, stage=f"{stage}: error")
             note(stage, "failed", round(time.time() - t0, 1))
-            return
+            return False
         with log.open("a", encoding="utf-8") as lf:
             lf.write(cp.stdout)
             lf.write(cp.stderr)
@@ -127,9 +145,10 @@ def _run_stages(root: Path, name: str, apk: Path, raw: bool = False,
         if cp.returncode != 0:
             write_status(root, stage=f"{stage}: failed (exit {cp.returncode})")
             note(stage, "failed", secs)
-            return
+            return False
         note(stage, "ok", secs)
     write_status(root, stage="done")
+    return True
 
 
 class Frames:
@@ -179,7 +198,7 @@ def evidence_files(root: Path) -> list[Path]:
 
 
 def evidence_list(root: Path) -> list[dict]:
-    return [{"rel": str(f.relative_to(root)), "bytes": f.stat().st_size}
+    return [{"rel": f.relative_to(root).as_posix(), "bytes": f.stat().st_size}
             for f in evidence_files(root)]
 
 
@@ -213,6 +232,7 @@ def session_view(root: Path) -> dict:
         status = {}
     tl = read_json(s.path("timeline"), {})
     rend = read_json(s.path("render"), {})
+    sec = read_json(s.path("sections"), {}) or {}
     branding = read_json(s.path("branding"), {"entries": []})
     boxes = []
     for i, e in enumerate(branding.get("entries", [])):
@@ -237,7 +257,8 @@ def session_view(root: Path) -> dict:
     for key, what in ARTIFACTS:
         p = s.path(key)
         if p.exists():
-            arts.append({"name": p.name, "what": what, "rel": str(p.relative_to(s.root)),
+            arts.append({"name": p.name, "what": what,
+                         "rel": p.relative_to(s.root).as_posix(),
                          "bytes": p.stat().st_size, "masked": "unmasked" not in what})
     prog = parse_progress(s.render / "progress.txt") if (s.render / "progress.txt").exists() else {}
     stale = False
@@ -259,6 +280,9 @@ def session_view(root: Path) -> dict:
         "align": tl.get("align", {}), "chapters": tl.get("chapters", []),
         "boxes": boxes, "screens": tl.get("screens", {}), "run": run,
         "steps": steps, "stale": stale, "walk": steps_w,
+        "sections": sec.get("sections", []),
+        "sections_total": sec.get("total_duration"),
+        "sections_source": sec.get("source"),
         "artifacts": arts, "progress": prog, "percent": pct,
         "proof": (rend.get("proof") or {}).get("tally", {}),
         "video_ready": bool((rend.get("video") or "")) and Path(rend.get("video", "")).exists(),
@@ -266,336 +290,46 @@ def session_view(root: Path) -> dict:
     }
 
 
-PAGE = """<!doctype html><meta charset=utf-8><title>adrd</title>
-<style>
-:root{--bg:#0e1116;--fg:#e6e9ef;--mut:#8b94a3;--ln:#1e242e;--ac:#5ac8fa;--ok:#34c759;--warn:#ff9500;--bad:#ff3b30}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,system-ui,sans-serif}
-header{display:flex;gap:14px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--ln);flex-wrap:wrap}
-h1{font-size:16px;margin:0;font-weight:600}header span{color:var(--mut);font-size:12px}
-main{display:grid;grid-template-columns:minmax(280px,340px) 1fr;gap:20px;padding:20px;align-items:start}
-@media (max-width:820px){main{grid-template-columns:1fr;padding:14px}header{padding:12px 14px}}
-.stage{border:1px solid var(--ln);border-radius:10px;padding:14px;margin-bottom:14px}
-.stage h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 10px}
-.view{position:relative;background:#000;border-radius:10px;overflow:hidden;border:1px solid var(--ln)}
-.view img{display:block;width:100%}
-.box{position:absolute;border:2px solid var(--bad);border-radius:3px}
-.box i{position:absolute;top:-19px;left:0;background:var(--bad);color:#000;font-size:10px;padding:1px 5px;border-radius:3px;font-style:normal;white-space:nowrap}
-.rail{display:flex;flex-direction:column;gap:2px}
-.ch{display:flex;gap:10px;padding:6px 8px;border-radius:6px;color:var(--mut)}
-.ch b{color:var(--fg);font-weight:500;flex:1}
-.ch.on{background:#161d27}.ch.on b{color:var(--ac)}
-.bar{height:6px;background:var(--ln);border-radius:3px;overflow:hidden;margin:8px 0}
-.bar i{display:block;height:100%;background:var(--ac)}
-table{width:100%;border-collapse:collapse;font-size:13px}
-td{padding:5px 8px;border-top:1px solid var(--ln);vertical-align:top}
-td:first-child{color:var(--mut);white-space:nowrap}
-a{color:var(--ac);text-decoration:none}
-.pill{font-size:11px;padding:2px 8px;border-radius:99px;background:#161d27;color:var(--mut)}
-.pill.ok{color:var(--ok)}.pill.warn{color:var(--warn)}.pill.bad{color:var(--bad)}
-pre{white-space:pre-wrap;color:var(--mut);font-size:12px;margin:0}
-.maskbox{position:absolute;overflow:hidden;backdrop-filter:blur(18px);
- -webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,149,0,.7)}
-.row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-button{background:#161d27;color:var(--fg);border:1px solid var(--ln);border-radius:6px;
- padding:6px 12px;font:inherit;cursor:pointer}
-button:hover{border-color:var(--ac)}
-video{width:100%;max-height:52vh;background:#000;border-radius:8px}
-.evi{max-height:340px;overflow:auto;display:flex;flex-direction:column;gap:4px}
-.evi a{font-size:12px;color:var(--mut);text-decoration:none}
-.evi a:hover{color:var(--ac)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
-.card{border:1px solid var(--ln);border-radius:10px;padding:12px}
-.card b{display:block}.card span{color:var(--mut);font-size:12px}
-.warn{background:#2a1e0b;border:1px solid #5c4313;border-radius:8px;padding:10px 12px;color:#ffcc80;font-size:13px}
-</style>
-<header><h1 id=t>loading</h1><span id=d></span><span id=dev></span>
-<span class=pill id=stage></span><button id=reRender style=display:none>Re-render</button><span style="flex:1"></span>
-<label class=row style=margin:0><input type=checkbox id=mt checked>mask preview</label>
-<button id=ex>Export all</button><a href="/">all sessions</a></header>
-<main><div>
-<div class=stage><h2>Live device</h2><div class=view id=v><img id=live alt=preview></div>
-<div id=err></div></div>
-<div class=stage><h2>Stage</h2><div id=step></div><div class=bar><i id=pb style=width:0></i></div><div id=pct></div></div>
-<div class=stage><h2>Inputs</h2><div id=inputs></div>
-<div class=row><input type=file id=fApk accept=".apk"><button id=bApk>Upload APK</button></div>
-<div class=row><input type=file id=fBrief accept=".md,.markdown,.txt,.pdf"><button id=bBrief>Upload brief</button></div>
-<div class=row><label class=row style=margin:0><input type=checkbox id=raw>include the unmasked capture in the export bundle</label></div>
-<div class=row><button id=bCases>Build test cases</button><button id=bRun>Start run</button></div>
-<div id=inote></div><pre id=ilog style="max-height:190px;overflow:auto;font-size:11px;margin:8px 0 0"></pre>
-</div>
-<div class=stage><h2>Rendered video</h2>
-<div class=row><label><input type=radio name=v checked id=vMask> masked</label>
-<label><input type=radio name=v id=vRaw> unmasked</label></div>
-<video id=vid controls playsinline></video><div id=vinfo></div></div>
-</div><div>
-<div class=stage><h2>Chapters</h2><div class=rail id=rail></div></div>
-<div class=stage><h2>Steps</h2><div id=steps></div></div>
-<div class=stage><h2>Walk</h2><div id=walk></div></div>
-<div class=stage><h2>Artifacts</h2><div id=arts></div></div>
-<div class=stage><h2>Masking</h2><div id=mask></div></div>
-<div class=stage><h2>Mask picker</h2>
-<div class=row><select id=pkSel style=flex:1></select></div>
-<div id=pkWrap style="position:relative;cursor:crosshair;max-width:280px">
-<img id=pkImg style="width:100%;display:block" alt="screen still">
-<div id=pkBox style="position:absolute;border:2px solid #ff5252;background:rgba(255,82,82,.25);display:none"></div>
-<div id=pkOld style="position:absolute;inset:0;pointer-events:none"></div>
-</div>
-<div class=row><input id=pkLabel value="brand mark" style=flex:1>
-<select id=pkMode><option>solid</option><option>pixelate</option><option>blur</option></select></div>
-<div class=row><button id=pkAdd>Add mask box</button><span id=pkNote></span></div>
-<div class=warn style=margin-top:8px>Drag across the brand mark in the still. Typed pixel
-rects were the failure before - this reads the box off the frame you are looking at.</div>
-</div>
-<div class=stage><h2>Evidences <button id=allimg style=padding:2px 8px>download all</button></h2>
-<div class=evi id=evi></div></div>
-</div></main>
-<script>
-const T=new URLSearchParams(location.search).get('t')||'';
-const S=location.pathname.replace(/\\/$/,'');
-const u=(p,q)=>{const o=Object.assign({t:T},q||{});return S+p+'?'+
-  Object.keys(o).map(k=>k+'='+encodeURIComponent(o[k])).join('&')};
-let boxes=[];
-function el(t,a,x){const e=document.createElement(t);Object.assign(e,a||{});if(x)e.innerHTML=x;return e}
-function draw(){const v=document.getElementById('v');v.querySelectorAll('.box').forEach(b=>b.remove());
- if(!v.clientWidth)return;const w=v.clientWidth;
- boxes.forEach(b=>{const f=b.frac;if(f[2]<=0)return;const d=el('div',{className:'box'});
-  d.className='box'+(masked?' maskbox':'');
-  d.style.cssText=`left:${f[0]*100}%;top:${f[1]*100}%;width:${f[2]*100}%;height:${f[3]*100}%`;
-  d.appendChild(el('i',{},b.label||''));v.appendChild(d)})}
-let masked=true, ART={};
-document.getElementById('mt').onchange=e=>{masked=e.target.checked;draw()};
-document.getElementById('ex').onclick=async e=>{e.target.disabled=1;e.target.textContent='exporting...';
- const r=await (await fetch(u('/api/export'))).json().catch(()=>({ok:false}));
- e.target.disabled=0;e.target.textContent=r.ok?'exported':'export failed';
- setTimeout(()=>{e.target.textContent='Export all';tick()},1200)};
-document.getElementById('allimg').onclick=()=>location=u('/images.zip');
-async function tick(){let j;
- try{j=await (await fetch(u('/state'))).json()}
- catch(e){document.getElementById('step').innerHTML='<pre>state fetch failed: '+e+
-   '</pre>';return}
- document.getElementById('t').textContent=j.app||j.session;
- document.getElementById('d').textContent=(j.package||'')+(j.duration?' - '+Math.round(j.duration)+'s':'');
- document.getElementById('dev').textContent=j.device?`${j.device} ${j.size?j.size.join('x'):''}`:'no device';
- const st=document.getElementById('stage');
- st.textContent=j.stale?'re-render needed':j.stage;
- st.className='pill '+(j.stale?'bad':(j.stage.includes('shar')?'ok':'warn'));
- const rb=document.getElementById('reRender');
- rb.style.display=j.stale?'inline-block':'none';
- rb.title='the boxes, the walk or the timings changed after this video was rendered';
- if(j.stale&&!rb.dataset.wired){rb.dataset.wired=1;
-  rb.onclick=()=>{rb.disabled=1;post('/api/render')
-   .then(x=>{note('re-rendering: '+x.stages.join(' then '),1);loadInputs();})
-   .catch(e=>note('re-render failed: '+String(e).slice(0,120)))
-   .finally(()=>{rb.disabled=0;});};}
- const s=j.step||{};
- const rs=(j.run&&j.run.stages)||[];
- const pill=h=>`<span class="pill ${h.state==='ok'?'ok':h.state==='running'?'warn'
-  :(h.state==='failed'||h.state==='interrupted')?'bad':''}">${h.name}${h.seconds?' '+h.seconds+'s':''}</span>`;
- document.getElementById('step').innerHTML=(rs.length
-  ?rs.map(pill).join(' ')+`<div class=n>run ${ht(j.run.started||'')}${j.run.raw
-    ?' - this export carries the unmasked capture':''}</div>`:'')+
-  (s.i!==undefined
-  ?`<b>${(s.chapter||'-')}</b><br><span style=color:var(--mut)>step ${s.i} · ${s.label||''}</span>`
-  :(rs.length?'':'<pre>idle - nothing running right now</pre>'));
- document.getElementById('pb').style.width=(j.percent||0)+'%';
- document.getElementById('pct').textContent=j.percent!=null?`render ${j.percent}%`:'';
- const cur=s.i!==undefined?j.chapters.findIndex(c=>s.chapter&&c.module===s.chapter):-1;
- document.getElementById('rail').innerHTML=j.chapters.map((c,i)=>
-  `<div class="ch ${i===cur?'on':''}"><span>${ff(c.t0)}-${ff(c.t1)}</span><b>${c.module}</b><span>${c.opened_with||''}</span></div>`).join('')||'<pre>no timeline yet</pre>';
- const stp=j.steps||[],miss=stp.filter(e=>e.mismatch||e.stuck).length;
- document.getElementById('steps').innerHTML=stp.length?
-  `<div class=n>${stp.length} step(s) replayed, ${miss} did not land on the screen scouted for them</div>`+
-  stp.map(e=>`<div class=row><span class=n>${ff(e.t||0)} ${(e.screen||'-')}</span>`+
-   `<span style=flex:1;margin-left:8px>${ht(e.label||'')}</span>`+
-   (e.mismatch?'<span class="pill bad">missed screen</span>'
-    :e.stuck?'<span class="pill bad">dialog in front</span>'
-    :'<span class="pill ok">ok</span>')+'</div>').join('')
-  :'<pre>no walk recorded yet</pre>';
- document.getElementById('arts').innerHTML='<table>'+j.artifacts.map(a=>
-  `<tr><td>${a.masked?`<a href="${u('/f/'+a.rel+'&dl=1')}">${a.name}</a>`:a.name}</td>`
-  +`<td>${a.what}</td><td>${kb(a.bytes)}</td>`
-  +`<td>${a.masked?'':'<span class="pill bad">unmasked</span>'}</td></tr>`).join('')+'</table>';
- boxes=j.boxes;draw();
- ART={};j.artifacts.forEach(a=>ART[a.name]=a.rel);
- const want=document.getElementById('vRaw').checked?'recording.mp4':'demo_debranded.mp4';
- const vid=document.getElementById('vid');
- if(ART[want]&&vid.dataset.rel!==ART[want]){vid.dataset.rel=ART[want];
-   vid.src=u('/f/'+ART[want],{dl:1});vid.load()}
- document.getElementById('vinfo').textContent=ART[want]?`${want} - ${kb((j.artifacts.find(a=>a.name===want)||{}).bytes||0)}`:'not built yet';
- if(!document.getElementById('evi').dataset.n){document.getElementById('evi').dataset.n=1;
-  fetch(u('/evidences')).then(r=>r.json()).then(l=>{document.getElementById('evi').innerHTML=
-   l.slice(0,400).map(e=>`<a href="${u('/f/'+e.rel,{dl:1})}" target=_blank>${e.rel}</a>`).join('')+
-   (l.length>400?`<span class=n>...${l.length-400} more - use download all</span>`:'')})}
- const p=j.proof||{},bad=Object.keys(p).filter(k=>k.startsWith('unchanged'));
- BOXES=j.boxes;pkOld();
- const scr=j.screens||{},sn=['global'].concat(Object.keys(scr));
- const win=b=>{if(b.scope==='global')return 'the whole film';
-  const w=scr[b.scope.replace('screen:','')]||[];
-  return w.length?w.map(x=>`${Math.round(x[0])}-${Math.round(x[1])}s`).join(' ')
-   :'no window - this box masks nothing'};
- const mkEl=document.getElementById('mask');
- // this panel repaints every 1.5s; rebuilding it under an open dropdown loses the
- // choice. Buttons keep their focus after a click, so only a select holds the panel still.
- const ae=document.activeElement;
- const editing=el=>ae&&['INPUT','SELECT','TEXTAREA'].includes(ae.tagName)&&el.contains(ae);
- if(!editing(mkEl))
-  mkEl.innerHTML=`<div>${j.boxes.length} box(es)</div>`+
-  j.boxes.map(b=>`<div class=row style=margin-top:4px><span class=n>${ht(b.label)} (${ht(b.mode)}) ${ht(win(b))}</span>`+
-   `<select data-sc=${b.i} style=margin-left:6px>`+sn.map(n=>`<option${n===b.scope.replace('screen:','')?' selected':''}>${n}</option>`).join('')+`</select>`+
-   `<button data-rm=${b.i} style="margin-left:auto;background:#1b2230;color:#e6e9ef;border:1px solid #2b3648">remove</button></div>`).join('')+
-  Object.entries(p).map(([k,v])=>`<span class="pill ${k.startsWith('strongly')?'ok':k.startsWith('unchanged')?'bad':''}">${v} ${k}</span>`).join(' ')+
-  (bad.length?`<div class=warn style=margin-top:8px>${bad.length} box covers nothing - fix its screen name or rect</div>`:'')+
-  '<div class=warn style=margin-top:10px>Everything on this page is UNMASKED '
-  +'client content. The only shareable file is the rendered mp4.</div>';
- const wk=j.walk||[], wkEl=document.getElementById('walk');
- const wsig=wk.map(x=>x.i+'|'+x.screen+'|'+x.label).join(';');
- // the walk rows are text inputs; rebuilding them while someone is typing loses the edit
- if(wkEl.dataset.sig!==wsig && !editing(wkEl)) {
-  wkEl.dataset.sig=wsig;
-  wkEl.innerHTML=(wk.length?wk.map(x=>`<div class=row><span class=n>${String(x.i).padStart(2,'0')} ${ht(x.ops)}</span>`+
-   `<input value="${ht(x.screen)}" data-ws=${x.i} style=width:86px>`+
-   `<input value="${ht(x.label)}" data-wl=${x.i} style=flex:1>`+
-   `<button data-rmw=${x.i}>drop</button></div>`).join('')+
-   "<div class=n>The screen name ties the mask boxes to the seconds of that step; the label is the caption burned into the video. Re-render after editing.</div>"
-   :'<pre>no walk yet - scaffold one or replay a scout pass</pre>');}
- const live=document.getElementById('live'),err=document.getElementById('err');
- if(!live.dataset.on){live.dataset.on=1;live.src=u('/stream')}
- err.innerHTML=live.dataset.err?`<pre>${live.dataset.err}</pre>`:''}
-document.getElementById('vMask').onchange=tick;
-document.getElementById('vRaw').onchange=tick;
-let PKS={size:[0,0],stills:[]},BOXES=[],pkDrag=null;
-function ht(s){return String(s==null?'':s).split('').map(c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]||c)).join('')}
-function pkOld(){const o=document.getElementById('pkOld');if(!o)return;
- const s=PKS.stills[+(document.getElementById('pkSel').value||0)];if(!s){o.innerHTML='';return}
- o.innerHTML=BOXES.filter(b=>b.scope==='screen:'+s.screen||b.scope==='global').map(b=>
-  `<div data-i=${b.i} title="drag to move - ${ht(b.label)}" style="position:absolute;pointer-events:auto;cursor:move;border:1px solid #5ac8fa;left:${b.frac[0]*100}%;top:${b.frac[1]*100}%;width:${b.frac[2]*100}%;height:${b.frac[3]*100}%"></div>`).join('')}
-let pkMv=null;
-function pkMove(e){if(!pkMv)return true;const p=pkPos(e),W=PKS.size[0]||1,H=PKS.size[1]||1;
- pkMv.x=Math.max(0,Math.min(W-pkMv.w,pkMv.sx+p[0]-pkMv.px));
- pkMv.y=Math.max(0,Math.min(H-pkMv.h,pkMv.sy+p[1]-pkMv.py));
- pkMv.d.style.left=(pkMv.x/W*100)+'%';pkMv.d.style.top=(pkMv.y/H*100)+'%';return false}
-async function pkDrop(){const m=pkMv;pkMv=null;if(!m)return;
- try{const j=await post('/api/box',{op:'set',i:m.i,x:Math.round(m.x),y:Math.round(m.y),
-    w:Math.round(m.w),h:Math.round(m.h)});
-  note('box moved to '+j.rect[0]+','+j.rect[1],1);}catch(err){note('move failed: '+String(err).slice(0,120));}
- tick();}
-function pkPos(ev){const im=document.getElementById('pkImg');const r=im.getBoundingClientRect();
- const W=PKS.size[0]||im.naturalWidth||1,H=PKS.size[1]||im.naturalHeight||1;
- return[Math.round((ev.clientX-r.left)/r.width*W),Math.round((ev.clientY-r.top)/r.height*H)];}
-function pkDraw(){const b=document.getElementById('pkBox');
- if(!pkDrag||!pkDrag.w||!pkDrag.h){b.style.display='none';return}
- const W=PKS.size[0]||1,H=PKS.size[1]||1;b.style.display='block';
- b.style.left=(pkDrag.x/W*100)+'%';b.style.top=(pkDrag.y/H*100)+'%';
- b.style.width=(pkDrag.w/W*100)+'%';b.style.height=(pkDrag.h/H*100)+'%';}
-const pkW=document.getElementById('pkWrap');
-if(pkW){pkW.onpointerdown=e=>{const d=e.target.closest&&e.target.closest('[data-i]');
-  if(d){const b=BOXES.find(x=>String(x.i)===d.dataset.i);
-    if(!b)return;const p=pkPos(e),W=PKS.size[0]||1,H=PKS.size[1]||1;
-    pkMv={d,i:b.i,sx:b.frac[0]*W,sy:b.frac[1]*H,w:b.frac[2]*W,h:b.frac[3]*H,
-          px:p[0],py:p[1],x:b.frac[0]*W,y:b.frac[1]*H};return}
-  e.preventDefault();const p=pkPos(e);pkDrag={ax:p[0],ay:p[1],x:p[0],y:p[1],w:0,h:0};
-  pkW.setPointerCapture(e.pointerId)};
- pkW.onpointermove=e=>{if(pkMv){pkMove(e);return}if(!pkDrag)return;const p=pkPos(e);
-  pkDrag.x=Math.min(pkDrag.ax,p[0]);pkDrag.y=Math.min(pkDrag.ay,p[1]);
-  pkDrag.w=Math.abs(p[0]-pkDrag.ax);pkDrag.h=Math.abs(p[1]-pkDrag.ay);pkDraw()};
- pkW.onpointerup=()=>{if(pkMv){pkDrop();return}pkDraw()};}
-async function loadPick(){const el=document.getElementById('pkSel');if(!el)return;
- try{const j=await(await fetch(u('/api/picklist'))).json();PKS=j;
-  el.innerHTML=j.stills.length?j.stills.map((s,i)=>`<option value="${i}">${s.still} - ${s.screen}</option>`).join(''):'<option>no stills captured yet</option>';
-  const im=document.getElementById('pkImg');if(j.stills.length)im.src=u('/f/stills/'+j.stills[0].still);
-  pkOld();
-  el.onchange=()=>{const s=j.stills[+el.value];if(s){document.getElementById('pkImg').src=u('/f/stills/'+s.still);pkDrag=null;pkDraw();pkOld();}}}
- catch(e){}}
-const pa=document.getElementById('pkAdd');
-if(pa)pa.onclick=async()=>{const n=document.getElementById('pkNote');
- if(!pkDrag||pkDrag.w<8||pkDrag.h<8){n.textContent='drag a box over the mark first';return}
- const s=PKS.stills[+(document.getElementById('pkSel').value||0)];if(!s){n.textContent='no still selected';return}
- pa.disabled=1;n.textContent='adding...';
- try{const r=await fetch(u('/api/box',{screen:s.screen,x:pkDrag.x,y:pkDrag.y,w:pkDrag.w,h:pkDrag.h,
-   label:document.getElementById('pkLabel').value||'brand mark',
-   mode:document.getElementById('pkMode').value}),{method:'POST'});
-  const j=await r.json();if(!r.ok)throw new Error(j.error||('http '+r.status));
-  n.textContent='added '+j.mode+' box on '+j.screen;tick();}
- catch(e){n.textContent='failed: '+e.message;}
- finally{pa.disabled=0;}};
-const mk=document.getElementById('mask');
-if(mk)mk.onclick=e=>{const b=e.target.closest&&e.target.closest('button');if(!b||!b.dataset.rm)return;
- b.disabled=1;fetch(u('/api/box',{op:'rm',i:b.dataset.rm}),{method:'POST'}).then(r=>r.json())
- .then(j=>{const n=document.getElementById('pkNote');if(n)n.textContent=j.error||('removed '+(j.label||'')+' - render again');tick();})
- .catch(()=>{b.disabled=0;});};
-if(mk)mk.onchange=e=>{const s=e.target.closest&&e.target.closest('select');if(!s)return;
- fetch(u('/api/box',{op:'set',i:s.dataset.sc,screen:s.value}),{method:'POST'}).then(r=>r.json())
- .then(j=>{const n=document.getElementById('pkNote');if(n)n.textContent=j.error||('box now on '+j.scope+' - render again');tick();})
- .catch(()=>{tick();});};
-const wkPanel=document.getElementById('walk');
-if(wkPanel)wkPanel.onchange=e=>{const t=e.target,si=t.dataset.ws,li=t.dataset.wl;
- if(si===undefined&&li===undefined)return;
- const q={op:'set',i:si!==undefined?si:li};
- if(si!==undefined)q.screen=t.value;else q.label=t.value;
- post('/api/walk',q).then(x=>{note('step '+x.i+' saved - re-render to move the windows',1);tick();})
-  .catch(err=>note('walk edit failed: '+String(err).slice(0,120)));};
-if(wkPanel)wkPanel.onclick=e=>{const b=e.target.closest&&e.target.closest('button');
- if(!b||!b.dataset.rmw)return;b.disabled=1;
- post('/api/walk',{op:'rm',i:b.dataset.rmw}).then(x=>{note('step '+x.i+' dropped - re-render',1);tick();})
-  .catch(err=>{note('drop failed: '+String(err).slice(0,120));b.disabled=0;});};
-loadPick();setInterval(loadPick,20000);
-loadInputs();
-function ff(s){s=Math.max(0,s||0);return String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0')}
-function kb(n){return n>1e6?(n/1e6).toFixed(1)+' MB':Math.round(n/1024)+' KB'}
-function note(m,ok){const e=document.getElementById('inote');if(e)e.innerHTML=m?`<span class="pill ${ok?'ok':'bad'}">${m}</span>`:''}
-const ba=document.getElementById('bApk');if(ba)ba.onclick=()=>uploadFile('apk','fApk');
-const bb=document.getElementById('bBrief');if(bb)bb.onclick=()=>uploadFile('brief','fBrief');
-const bc=document.getElementById('bCases');
-if(bc)bc.onclick=()=>{bc.disabled=1;note('building cases...');post('/api/cases')
- .then(j=>{note(j.count+' case(s) from the '+j.origin,1);loadInputs();})
- .catch(e=>note('cases failed: '+String(e).slice(0,120)))
- .finally(()=>{bc.disabled=0;});};
-const br=document.getElementById('bRun');
-if(br)br.onclick=()=>{br.disabled=1;const rw=document.getElementById('raw');note('run queued...');post('/api/run',rw&&rw.checked?{raw:1}:{})
- .then(j=>{note(j&&j.ok?'run started - launch, take, brand, render, sweep, doc, export'+(j.export_includes_raw?' (export WILL carry the unmasked capture)':' (export excludes the unmasked capture)'):'queued: '+(j&&j.error||''),j&&j.ok);loadInputs();})
- .catch(e=>note('run failed: '+String(e).slice(0,140)))
- .finally(()=>{loadInputs();});};
-async function post(p,x){const r=await fetch(u(p,x),{method:'POST'});return r.ok?await r.json():Promise.reject((await r.json().catch(()=>({}))).error||('http '+r.status));}
-async function uploadFile(kind,inputId){const el=document.getElementById(inputId);const file=el.files[0];if(!file)return note('pick a '+kind+' file first');const btn=document.getElementById('b'+(kind==='apk'?'Apk':'Brief'));btn.disabled=1;btn.textContent='uploading...';note('sending '+kb(file.size));try{const r=await fetch(u('/api/upload',{kind,name:file.name}),{method:'POST',body:file});const j=await r.json();if(!r.ok)throw new Error(j.error||('http '+r.status));note(kind+' uploaded: '+j.name+' '+kb(j.bytes),1);el.value='';loadInputs();}catch(e){note('upload rejected: '+e.message);}finally{btn.disabled=0;btn.textContent=kind==='apk'?'Upload APK':'Upload brief';}}
-async function loadInputs(){const el=document.getElementById('inputs');if(!el)return;try{const j=await(await fetch(u('/api/inputs'))).json();el.innerHTML='<table><tr><td>APK</td><td>'+(j.apk?j.apk.name+' ('+kb(j.apk.bytes)+')':'none')+'</td></tr><tr><td>Brief</td><td>'+(j.brief?j.brief.name+' ('+kb(j.brief.bytes)+')':'none')+'</td></tr><tr><td>Cases</td><td>'+(j.cases?j.cases.count+' from '+j.cases.origin:'none')+' &nbsp;<a href="'+u('/f/CASES.md')+'">open</a></td></tr><tr><td>Running</td><td>'+(j.running?'yes':'no')+'</td></tr></table>';const lg=document.getElementById('ilog');if(lg)lg.textContent=j.log||'';const rb=document.getElementById('bRun');if(rb)rb.disabled=!!j.running;}catch(e){el.innerHTML='<pre>inputs fetch failed: '+e+'</pre>';}}
-tick();setInterval(tick,1500);setInterval(draw,900);
-</script>"""
+def live_view(root: Path) -> dict:
+    """What a recipient of a share link may see. Deliberately not session_view: no
+    boxes, no walk, no device internals, and no path to the unmasked capture."""
+    v = session_view(root)
+    tl = read_json(root / "timeline.json", {}) or {}
+    return {
+        "session": v["session"], "app": v.get("app"), "package": v.get("package"),
+        "stage": v.get("stage"), "stale": v.get("stale"),
+        "running": bool(RUNS.get(root.name, {}).get("alive")),
+        "video_ready": v.get("video_ready"), "duration": v.get("duration"),
+        "percent": v.get("percent"), "updated": v.get("updated"),
+        "sections": v.get("sections") or [],
+        "sections_total": v.get("sections_total"),
+        "chapters": [{"title": c.get("title"), "t0": c.get("t0"), "t1": c.get("t1")}
+                     for c in tl.get("chapters", [])],
+        "report_ready": (root / "render" / "SESSION_DOC.pdf").is_file(),
+        "doc_ready": (root / "render" / "SESSION_DOC.md").is_file(),
+        "events": SH.recent_events(root, 8),
+    }
 
-INDEX = """<!doctype html><meta charset=utf-8><title>adrd sessions</title>
-<style>body{background:#0e1116;color:#e6e9ef;font:14px/1.6 -apple-system,system-ui,sans-serif;margin:0;padding:24px}
-h1{font-size:16px}h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#8b94a3;margin:22px 0 6px}
-a{color:#5ac8fa;text-decoration:none}
-ol{margin:0;padding-left:20px;max-width:760px;color:#c8d0dc}li{margin:2px 0}
-table{border-collapse:collapse;width:100%;max-width:900px}td{padding:8px;border-top:1px solid #1e242e;vertical-align:top}
-.scroll{overflow-x:auto;max-width:100%}.scroll table{min-width:620px}
-tr:first-child td{color:#8b94a3;font-size:12px;border-top:none}
-td:first-child{color:#8b94a3;white-space:nowrap}.n{color:#8b94a3;font-size:12px}
-.ok{color:#34c759}.warn{color:#ff9f0a}</style>
-<h1>adrd - Android recording and de-branding rounds</h1>
-<p class=n>Each row is one round on one device. Open a session to upload the build, run the
-walk, watch the screen while it goes, and export the masked video.</p>
-<h2>How a round goes</h2>
-<ol>
-<li>Upload the <b>APK</b> under test (up to 200 MB) - it lands in the session, nothing is
-installed until you run.</li>
-<li>Upload the <b>brief</b> (.md, .txt, .xml or .pdf) describing the cases. Without one the
-tool builds its own cases from the routes it read out of the app source.</li>
-<li><b>Run</b> installs the build, cold-starts it, replays the walk while the screen is
-recorded, masks the client branding, burns in the chapter captions, writes the report and
-builds the export bundle.</li>
-<li>Watch the live device view and the stage strip while it runs, from anywhere the link
-opens.</li>
-<li>Read the report, check the sweep sheet with your own eyes, then download the bundle.
-Only the rendered video and the report are for sharing - the raw capture is unmasked.</li>
-</ol>
-<h2>Sessions</h2>
-<div class=scroll>
-<table><tr><td>session</td><td>app</td><td>apk</td><td>stage</td><td>length</td><td>shareable</td></tr>
-__ROWS__</table>
-</div>
-<p class=n>Bound to __HOST__. The token in this URL is the only access control, and app names
-appear in the list above, so treat the link as internal. Live frames are unmasked client
-content.</p>"""
+
+_UI = Path(__file__).with_name("ui")
+
+
+def _asset(name: str) -> str:
+    return (_UI / name).read_text(encoding="utf-8")
+
+
+def _compose(page: str, css: str, js: str = "") -> str:
+    """Templates live in ui/ so the Python stays readable and the inline script can be
+    checked on its own. CSS and JS are inlined because the dashboard serves one file."""
+    return (_asset(page)
+            .replace("{{CSS}}", _asset("base.css") + "\n" + _asset(css))
+            .replace("{{JS}}", _asset(js) if js else ""))
+
+
+PAGE = _compose("page.html", "app.css", "app.js")
+LIVE = _compose("live.html", "live.css", "live.js")
+INDEX = _asset("index.html").replace(
+    "{{CSS}}", _asset("base.css") + "\n" + _asset("index.css"))
 
 
 def _frame_size(root: Path) -> list[int]:
@@ -680,17 +414,26 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 v = session_view(d)
                 apk = (d / "inputs" / "app.apk").is_file()
+                scope = UP.read_scope(d)
+                sec = read_json(d / "render" / "sections.json", {}) or {}
                 href = f"/s/{d.name}/?t={self.cfg['token']}"
-                rows.append(f"<tr><td><a href='{href}'>{v['session']}</a></td>"
-                            f"<td>{v['app'] or ''}</td>"
-                            f"<td>{'<span class=ok>uploaded</span>' if apk else 'none'}</td>"
-                            f"<td>{v['stage']}</td>"
-                            f"<td>{int(v['duration'] or 0)}s</td>"
-                            f"<td>{'yes' if v['video_ready'] else 'not yet'}</td></tr>")
+                rows.append(
+                    f"<tr><td><a href='{href}'>{v['session']}</a></td>"
+                    f"<td class='app'>{v['app'] or ''}</td>"
+                    f"<td class='n'>{UP.SCOPES[scope]['label']}</td>"
+                    f"<td class='{'ok' if apk else 'none'}'>{'apk' if apk else 'none'}</td>"
+                    f"<td class='n'>{v['stage']}</td>"
+                    f"<td class='n'>{int(v['duration'] or 0)}s</td>"
+                    f"<td class='n'>{sec.get('count') or '-'}</td>"
+                    f"<td class='{'ok' if v['video_ready'] else 'none'}'>"
+                    f"{'yes' if v['video_ready'] else 'not yet'}</td></tr>")
             html = (INDEX.replace("__ROWS__",
-                                  "\n".join(rows) or "<tr><td colspan=6>none yet</td></tr>")
+                                  "\n".join(rows) or
+                                  "<tr><td colspan=8 class=n>No rounds yet.</td></tr>")
                     .replace("__HOST__", "127.0.0.1" if self.cfg["loopback"] else self.cfg["host"]))
             return self._send(200, html.encode(), "text/html; charset=utf-8")
+        if parts and parts[0] == "live" and len(parts) >= 2:
+            return self._live_get(parts[1], parts[2:], q)
         if parts and parts[0] == "s" and len(parts) >= 2:
             return self._session_route(parts[1], parts[2] if len(parts) > 2 else "",
                                        parts[3:], q)
@@ -741,6 +484,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         parts = [unquote(p) for p in u.path.split("/") if p]
+        if parts and parts[0] == "live" and len(parts) >= 2:
+            return self._live_post(parts[1], parts[2:], q)
         if parts and parts[0] == "s" and len(parts) >= 4 and parts[2] == "api":
             return self._session_post(parts[1], parts[3] if len(parts) > 3 else "", q)
         if not parts or parts[0] != "ingest" or len(parts) < 3:
@@ -801,6 +546,79 @@ class Handler(BaseHTTPRequestHandler):
         code, out = IN.put_chunk(root, parts[2], n, data)
         self._send(code, json.dumps(out).encode(), "application/json")
 
+    # ---- live link: read-only, share-token scoped, masked artifacts only ---------
+
+    def _live_session(self, name: str, q: dict) -> Path | None:
+        root = self._session(name)
+        if root is None:
+            self._send(404, b"no such session", "text/plain")
+            return None
+        if not SH.valid(root, q.get("t", [""])[0]):
+            self._send(401, b"this live link is not valid - ask for a fresh one",
+                       "text/plain")
+            return None
+        return root
+
+    def _live_get(self, name: str, rest: list[str], q: dict) -> None:
+        root = self._live_session(name, q)
+        if root is None:
+            return
+        what = rest[0] if rest else ""
+        if what == "":
+            return self._send(200, LIVE.encode(), "text/html; charset=utf-8",
+                              {"Cache-Control": "no-store"})
+        if what == "state":
+            view = live_view(root)
+            view["share_url"] = SH.link(root, self._base())
+            return self._send(200, json.dumps(view).encode(), "application/json",
+                              {"Cache-Control": "no-store"})
+        if what == "events":
+            return self._send(200, json.dumps(SH.recent_events(root)).encode(),
+                              "application/json")
+        if what == "stream":
+            return self._stream(root)
+        if what == "f" and len(rest) >= 2:
+            rel = "/".join(rest[1:])
+            if not SH.shareable(rel):
+                return self._send(403, b"not part of the shared results", "text/plain")
+            return self._file(root, rel, download=bool(q.get("dl")))
+        return self._send(404, b"not found", "text/plain")
+
+    def _live_post(self, name: str, rest: list[str], q: dict) -> None:
+        root = self._live_session(name, q)
+        if root is None:
+            return
+        if not rest or rest[0] != "subscribe":
+            return self._send(404, b"not found", "text/plain")
+        body = self._json_body()
+        if body is None:
+            return self._send(413, b"json body too large", "text/plain")
+        try:
+            payload = json.loads(body or b"{}")
+            email = (payload.get("email") if isinstance(payload, dict) else "") \
+                or q.get("email", [""])[0]
+            out = SH.subscribe(root, str(email))
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        return self._json(200, {"ok": True, **out})
+
+    def _share(self, root: Path, q: dict) -> None:
+        trigger = None
+        try:
+            email = q.get("email", [""])[0]
+            if email:
+                SH.subscribe(root, email)
+                # the recipient asked for the link, so the one email that carries it
+                # should actually go out now (or land in the outbox) rather than wait
+                trigger = SH.notify(root, "link", base=self._base(), blocking=True,
+                                    only=email)
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        url = SH.link(root, self._base())
+        self._json(200, {"ok": True, "link": url, "subscribers":
+                         len(SH.subscribers(root)), "smtp": SH.smtp_configured(),
+                         "trigger": trigger})
+
     # ---- run inputs: the APK under test and the brief it is tested from ----------
 
     def _session_post(self, name: str, what: str, q: dict) -> None:
@@ -811,9 +629,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(401, b"token required (see the URL adrd printed)", "text/plain")
         if what == "upload":
             return self._upload(root, q)
+        if what == "scope":
+            return self._scope(root, q)
+        if what == "share":
+            return self._share(root, q)
         if what == "cases":
             try:
-                out = UP.build_cases(root)
+                out = UP.build_cases(root, q.get("scope", [""])[0] or None)
             except UP.UploadError as e:
                 return self._send(e.status, json.dumps({"error": str(e)}).encode(),
                                   "application/json")
@@ -822,6 +644,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._run(root, name, q)
         if what == "render":
             return self._render(root, name)
+        if what == "export":
+            return self._export(root, q)
         if what == "box":
             return self._box(root, q)
         if what == "walk":
@@ -972,6 +796,14 @@ class Handler(BaseHTTPRequestHandler):
                 seen.add(still)
                 out.append({"still": still, "screen": e.get("screen") or "",
                             "label": e.get("label") or ""})
+        # A box is scoped to a screen name, and render masks nothing at all when that name
+        # is not in the timeline. So the frames offered here are only the ones whose file
+        # is named after a screen the take actually saw.
+        known = set(tl.get("screens") or {}) | {e.get("screen") for e in tl.get("events", [])}
+        for p in sorted((root / "stills").glob("*.png")):
+            if p.name not in seen and p.stem in known:
+                seen.add(p.name)
+                out.append({"still": p.name, "screen": p.stem, "label": ""})
         self._send(200, json.dumps({"size": _frame_size(root), "stills": out}).encode(),
                    "application/json")
 
@@ -991,37 +823,77 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json")
         self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json")
 
+    def _scope(self, root: Path, q: dict) -> None:
+        try:
+            name = UP.write_scope(root, q.get("scope", [""])[0])
+        except UP.UploadError as e:
+            return self._json(e.status, {"error": str(e)})
+        self._json(200, {"ok": True, "scope": name, **UP.SCOPES[name]})
+
     def _run(self, root: Path, name: str, q: dict) -> None:
         if not (root / "inputs" / "app.apk").is_file():
             return self._json(400, {"error": "upload an .apk first"})
+        scope = UP.read_scope(root)
+        cases = read_json(root / "cases.json", {}) or {}
+        if cases.get("scope") != scope or not cases.get("cases"):
+            # the scope on disk and the cases on disk must describe the same run
+            try:
+                UP.build_cases(root, scope)
+            except UP.UploadError as e:
+                return self._json(e.status, {"error": str(e)})
         raw = q.get("raw", [""])[0] in ("1", "yes", "true")
-        self._start(root, name, raw)
+        self._start(root, name, raw, base=self._base())
 
     def _render(self, root: Path, name: str) -> None:
         """Re-run the output stages after a box or caption edit. Without this the page
         kept serving a video that no longer matched the boxes listed beside it."""
         if not (root / "timeline.json").is_file():
             return self._json(400, {"error": "nothing recorded yet - run the round first"})
-        self._start(root, name, False, ("retimeline", "render", "sweep", "doc", "export"))
+        self._start(root, name, False,
+                    ("retimeline", "render", "sections", "sweep", "doc", "export"),
+                    base=self._base())
+
+    def _base(self) -> str:
+        """The origin the viewer actually reached, so an emailed link opens for them."""
+        env = os.environ.get("ADRD_PUBLIC_URL", "").strip()
+        if env:
+            return env.rstrip("/")
+        origin = getattr(self.server, "public_origin", None)
+        if origin:
+            return origin.rstrip("/")
+        host = self.headers.get("Host") or f"127.0.0.1:{self.cfg['port']}"
+        proto = self.headers.get("X-Forwarded-Proto") or "http"
+        return f"{proto}://{host}"
 
     def _start(self, root: Path, name: str, raw: bool = False,
-               only: tuple[str, ...] | None = None) -> None:
+               only: tuple[str, ...] | None = None, base: str = "") -> None:
         with RUN_LOCK:
             if RUNS.get(name, {}).get("alive"):
                 return self._json(409, {"error": "a run is already going"})
-            RUNS[name] = {"alive": True}
+            RUNS[name] = {"alive": True, "base": base}
         threading.Thread(target=_run_guarded,
-                         args=(root, name, root / "inputs" / "app.apk", raw, only),
+                         args=(root, name, root / "inputs" / "app.apk", raw, only, base),
                          daemon=True).start()
+        if only is None:
+            try:
+                SH.notify(root, "started", base=base)
+            except Exception:
+                pass  # a trigger must never block the run it announces
         self._json(202, {"ok": True, "log": "inputs/run.log",
                          "stages": list(only or RUN_STAGES),
                          "export_includes_raw": raw})
 
     def _inputs(self, root: Path) -> None:
         cases = read_json(root / "cases.json", None)
+        scope = UP.read_scope(root)
         out = UP.listed(root)
+        out["scope"] = {"name": scope, **UP.SCOPES[scope]}
+        out["scopes"] = UP.SCOPES
         out["cases"] = None if cases is None else {
-            "origin": cases.get("origin"), "count": len(cases.get("cases", []))}
+            "origin": cases.get("origin"), "count": len(cases.get("cases", [])),
+            "scope": cases.get("scope"), "counts": cases.get("counts") or {},
+            "sections": cases.get("sections") or [],
+            "stale": cases.get("scope") != scope}
         out["running"] = bool(RUNS.get(root.name, {}).get("alive"))
         log = root / "inputs" / "run.log"
         out["log"] = log.read_text(encoding="utf-8", errors="replace")[-4000:] \
@@ -1049,11 +921,19 @@ class Handler(BaseHTTPRequestHandler):
         if what == "images.zip":
             return self._zip(root)
         if what == "api" and rest and rest[0] == "export":
-            return self._export(root)
+            return self._export(root, q)
         if what == "api" and rest and rest[0] == "inputs":
             return self._inputs(root)
         if what == "api" and rest and rest[0] == "picklist":
             return self._picklist(root)
+        if what == "api" and rest and rest[0] == "share":
+            tok = SH.token(root)
+            return self._send(200, json.dumps({
+                "ok": True, "configured": bool(tok),
+                "link": SH.link(root, self._base()) if tok else None,
+                "subscribers": len(SH.subscribers(root)) if tok else 0,
+                "smtp": SH.smtp_configured(),
+                "events": SH.recent_events(root, 8)}).encode(), "application/json")
         return self._send(404, b"not found", "text/plain")
 
     def _file(self, root: Path, rel: str, download: bool = False) -> None:
@@ -1070,6 +950,8 @@ class Handler(BaseHTTPRequestHandler):
                                  b"'adrd watch --allow-unmasked' if you own it",
                              "text/plain")
         ctype = {"mp4": "video/mp4", "vtt": "text/vtt", "png": "image/png",
+                 "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                 "pdf": "application/pdf",
                  "md": "text/markdown; charset=utf-8", "json": "application/json",
                  "txt": "text/plain; charset=utf-8"}.get(p.suffix.lstrip("."), "application/octet-stream")
         data = p.read_bytes()
@@ -1131,16 +1013,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, "application/zip", {"Content-Disposition":
                                                    f'attachment; filename="{name}"'})
 
-    def _export(self, root: Path) -> None:
+    def _export(self, root: Path, q: dict) -> None:
         from . import export as X
         s = Session(root)
+        # off unless asked: a bundle that quietly carries the unmasked capture is the
+        # one leak this tool cannot undo once it leaves the machine.
+        raw = q.get("raw", [""])[0] in ("1", "yes", "true")
         try:
-            X.build(s, include_raw=True, dest=str(root / "export"))
+            X.build(s, include_raw=raw, dest=str(root / "export"))
         except Exception as exc:
             return self._send(500, str(exc).encode(), "text/plain")
-        self._send(200, json.dumps({"ok": True,
-                                    "zip": str((root / "export.zip").stat().st_size)}).encode(),
-                   "application/json")
+        self._json(200, {"ok": True, "raw": raw,
+                         "zip": (root / "export.zip").stat().st_size})
 
     do_HEAD = do_GET
 
@@ -1160,6 +1044,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.frames = Frames(cfg.get("adb"))
         self.closing = False
         self.public_url = None
+        self.public_origin = None
 
     def serve_thread(self) -> threading.Thread:
         t = threading.Thread(target=self.serve_forever, daemon=True)
@@ -1410,6 +1295,7 @@ def start(sessions_dir: Path, port: int = 8734, host: str = "127.0.0.1",
             page = f"{pub}/s/{focus}/?t={token}" if focus else f"{pub}/?t={token}"
             print(f"PUBLIC {page}", flush=True)
             srv.public_url = page
+            srv.public_origin = pub
             d = read_json(tunnel_record(sessions_dir), {}) or {}
             if d.get("token") != token:  # so the next restart can reuse this whole link
                 d["token"] = token

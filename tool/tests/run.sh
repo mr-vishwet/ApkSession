@@ -3,7 +3,8 @@
 set -uo pipefail
 SKILL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$SKILL/.." && pwd)"
-PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY="$(command -v python3)"
+PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY="$ROOT/.venv/Scripts/python.exe"
+[ -x "$PY" ] || PY="$(command -v python3)"
 ADRD="$PY $SKILL/scripts/adrd.py"
 WORK="${1:-$(mktemp -d /tmp/adrd-selftest.XXXX)}"
 FIX="$WORK/fixture_app"
@@ -11,6 +12,20 @@ SESS=""
 fails=0
 
 check() { if [ "$1" = "0" ]; then echo "  ok   $2"; else echo "  FAIL $2"; fails=$((fails+1)); fi; }
+
+# On Windows the venv python.exe is a launcher that starts the real interpreter as a
+# child, so killing the pid bash knows about leaves the server (and its stdout pipe)
+# alive. Kill the whole tree where the platform allows it.
+kill_tree() {
+  local p="${1:-}"
+  [ -n "$p" ] || return 0
+  if [ -r "/proc/$p/winpid" ] && command -v taskkill >/dev/null 2>&1; then
+    taskkill //T //F //PID "$(cat "/proc/$p/winpid")" >/dev/null 2>&1 || kill "$p" 2>/dev/null
+  else
+    kill "$p" 2>/dev/null
+  fi
+}
+trap 'kill_tree "${WPID:-}"' EXIT
 
 mkdir -p "$FIX/lib/features/auth" "$FIX/lib/features/home" "$FIX/lib/core"
 cat > "$FIX/pubspec.yaml" <<'Y'
@@ -118,6 +133,7 @@ $ADRD brand preset --session "$SESS" --name debug-banner status-bar > /dev/null
 $ADRD sheet --session "$SESS" --cell-h 300 > /dev/null; check $? "annotated screen sheet"
 $ADRD render --session "$SESS" --step-captions --clock > "$WORK/render.log" 2>&1
 check $? "render"
+$ADRD sections --session "$SESS" > "$WORK/sections.log" 2>&1; check $? "sections"
 $ADRD sweep --session "$SESS" --height 420 > /dev/null; check $? "sweep"
 $ADRD doc --session "$SESS" > /dev/null; check $? "doc"
 grep -q "unchanged - box is wrong" "$WORK/render.log" && check 1 "no mispositioned box" || check 0 "no mispositioned box"
@@ -130,6 +146,13 @@ v = Path(r["video"])
 assert v.exists() and v.stat().st_size > 100_000, v
 assert Path(r["vtt"]).exists() and Path(r["proof"]["sheet"]).exists()
 assert (S / "render/sweep.png").exists()
+sec = json.load(open(S / "render/sections.json"))
+assert sec["count"] == 6 and sec["source"] == "render/demo_debranded.mp4", sec
+for item in sec["sections"]:
+    clip = S / item["file"]
+    assert clip.exists() and clip.stat().st_size > 1000, clip
+    assert abs(item["duration"] - (item["t1"] - item["t0"])) < 0.3, item
+assert sec["sections"][0]["t0"] == 0.0 and sec["sections"][-1]["t1"] <= r["rendered_seconds"]
 tally = r["proof"]["tally"]
 assert tally.get("unchanged - box is wrong", 0) == 0, tally
 assert tally.get("strongly reduced - confirm by eye", 0) >= 12, tally
@@ -188,6 +211,23 @@ expect_len "index explains the round"     "How a round goes" "$B/?t=$TOK"
 expect_len "index shows whether the apk is up" ">apk<" "$B/?t=$TOK"
 expect "index also needs the token"       401 "$B/"
 expect "dashboard page"                   200 "$B/s/$N/?t=$TOK"
+expect_len "console offers the scope toggle"  "Focused" "$B/s/$N/?t=$TOK"
+expect_len "console lists the section cuts"   "Rushes" "$B/s/$N/?t=$TOK"
+SHARE_JSON=$(curl -s -m 5 -X POST "$B/s/$N/api/share?t=$TOK")
+SLINK=$("$PY" -c 'import json,sys;print(json.load(sys.stdin).get("link") or "")' <<<"$SHARE_JSON")
+STOK=${SLINK##*t=}
+expect "live page opens with its own token" 200 "$SLINK"
+expect "live page rejects the master token" 401 "$B/live/$N/?t=$TOK"
+expect "live page cannot serve the raw capture" 403 "$B/live/$N/f/recording.mp4?t=$STOK"
+LIVE_STATE=$(curl -s -m 5 "$B/live/$N/state?t=$STOK")
+if printf '%s' "$LIVE_STATE" | grep -q '"boxes"'; then
+  echo "  FAIL live state leaked the mask boxes"; fails=$((fails+1))
+else echo "  ok   live state hides operator internals"; fi
+curl -s -m 5 -X POST -H 'Content-Type: application/json' \
+  -d '{"email":"viewer@example.com"}' "$B/live/$N/subscribe?t=$STOK" > /dev/null
+if grep -q 'viewer@example.com' "$SESS/share/subscribers.json" 2>/dev/null; then
+  echo "  ok   live page captured an email"
+else echo "  FAIL live page did not capture the email"; fails=$((fails+1)); fi
 expect "artifact download"                200 "$B/s/$N/f/render/SESSION_DOC.md?t=$TOK"
 expect "video streams"                    200 "$B/s/$N/f/render/demo_debranded.mp4?t=$TOK"
 expect_traversal() {
@@ -272,7 +312,12 @@ check "$?" "run inputs pytest suite"
 tail -1 "$WORK/uploads-pytest.log" | grep -q "passed" \
   && echo "  ok   uploads/cases/run suite reported passed" \
   || { echo "  FAIL uploads suite did not report passed"; fails=$((fails+1)); }
-kill $WPID 2>/dev/null
+"$PY" -m pytest -q "$SKILL/tests/test_share.py" > "$WORK/share-pytest.log" 2>&1
+check "$?" "live link and trigger pytest suite"
+tail -1 "$WORK/share-pytest.log" | grep -q "passed" \
+  && echo "  ok   share suite reported passed" \
+  || { echo "  FAIL share suite did not report passed"; fails=$((fails+1)); }
+kill_tree "$WPID"
 
 echo
 if [ "$fails" = "0" ]; then echo "PASS  artifacts in $SESS"; else echo "FAIL  $fails stage(s) - see $WORK"; fi

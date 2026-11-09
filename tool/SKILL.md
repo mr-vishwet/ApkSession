@@ -45,8 +45,10 @@ nothing needs to be redone from scratch when only the boxes or the script change
 | mask | `$ADRD brand add/list/preset/rm --session $S` | `branding.json` |
 | review | `$ADRD sheet --session $S` | annotated contact sheet of every screen |
 | render | `$ADRD render --session $S --step-captions` | `render/demo_debranded.mp4` + `.vtt` |
+| cut | `$ADRD sections --session $S` | one clip per chapter under `render/sections/` |
 | verify | `$ADRD proof` / `$ADRD sweep --session $S` | region proof sheet + full-frame sweep |
 | document | `$ADRD doc --session $S` | `render/SESSION_DOC.md`, `ARTIFACTS.md` |
+| bundle | `$ADRD export --session $S` | `export.zip` with a sha256 manifest |
 | watch | `$ADRD watch --session $S` | live dashboard on a fixed port |
 
 ## The live dashboard
@@ -62,6 +64,19 @@ see whether a box actually covers the logo *before* spending a render — plus t
 rail with the step executing now, `verify` mismatches, real render progress from ffmpeg's
 `-progress`, and download links for every artifact.
 
+The call sheet takes the APK and an optional spec (`.md`, `.txt`, `.xml`, `.pdf`) and the
+**Focused / Full app** scope: Focused tests only the steps the spec names and refuses to
+run without a spec; Full app runs the spec steps first, then every route the source scan
+found. Below the frame, the rushes strip holds one clip per chapter, sortable, each cut
+from the masked master.
+
+`Create link` mints a second, read-only token and `/live/<session>` opens for anyone with
+it: the masked master, the section cuts and the report, never the raw capture or the
+stills. An email left on that page, or in the console, subscribes the person to the run
+triggers ("started, view here" and "finished, check the results"). With `ADRD_SMTP_*` set
+those go out over SMTP; without it each one is written to `share/outbox/` so nothing is
+silently dropped.
+
 **The frames on that page are unmasked client app content.** It binds `127.0.0.1` by
 default. `--lan` binds `0.0.0.0` for a phone or laptop on the same network and generates
 an access token that every route then requires, including the index. Do not put this
@@ -76,8 +91,8 @@ the brand is still visible.
 2. **The session directory is confidential.** `stills/`, `recording.mp4`,
    `debrand_proof.png`, the `SRC` column of the proof sheet and **the live dashboard
    itself** all contain the client brand — that is the point of them. Only
-   `render/demo_debranded.mp4`, `render/demo_chapters.vtt` and `render/SESSION_DOC.md`
-   are shareable. Say so when handing off.
+   `render/demo_debranded.mp4`, `render/demo_chapters.vtt`, the clips under
+   `render/sections/` and `render/SESSION_DOC.md` are shareable. Say so when handing off.
 3. **Never claim "branding is gone" from the numbers.** The per-region check measures
    edge energy, and edge energy saturates: sigma 12 and sigma 100 scored 0.23 and 0.15
    on the same wordmark, and sigma 22 was still perfectly readable. `$ADRD sweep`

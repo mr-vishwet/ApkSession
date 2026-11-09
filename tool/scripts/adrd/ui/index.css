@@ -1,0 +1,46 @@
+/* Session list: the same slate and rules as the console, no card grid. */
+
+.shell{max-width:1180px;margin:0 auto;padding:0 22px 90px}
+.intro{padding:42px 0 30px;border-bottom:1px solid var(--line)}
+.intro h1{font-size:38px;line-height:1.08;max-width:16ch}
+.lede{color:var(--mut);max-width:62ch;margin-top:14px;font-size:14.5px;line-height:1.6}
+.lede code{font-size:12.5px;color:var(--paper);background:var(--panel);padding:1px 5px;
+  border-radius:4px;border:1px solid var(--line)}
+
+.rule{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+  border-bottom:1px solid var(--line);padding-bottom:9px;margin:34px 0 16px}
+.rule h2{font-family:var(--mono);font-size:11px;font-weight:500;text-transform:uppercase;
+  letter-spacing:.16em;color:var(--mut)}
+
+.steps{margin:0;padding:0;list-style:none;counter-reset:s;display:grid;
+  grid-template-columns:1fr 1fr;gap:0 34px}
+.steps li{counter-increment:s;position:relative;padding:12px 0 12px 44px;
+  border-top:1px solid var(--line);font-size:13px;line-height:1.55;color:var(--mut)}
+.steps li:nth-child(-n+2){border-top:0}
+.steps li::before{content:counter(s,decimal-leading-zero);position:absolute;left:0;top:13px;
+  font-family:var(--mono);font-size:11px;color:var(--accent)}
+.steps b{color:var(--paper);font-weight:500}
+@media (max-width:760px){
+  .steps{grid-template-columns:1fr}
+  .steps li:nth-child(2){border-top:1px solid var(--line)}
+  .intro{padding-top:28px}
+  .intro h1{font-size:30px}
+}
+
+.scroll{overflow-x:auto;max-width:100%}
+table{width:100%;border-collapse:collapse;min-width:760px;font-size:13px}
+th{font-family:var(--mono);font-size:10.5px;font-weight:500;text-transform:uppercase;
+  letter-spacing:.1em;color:var(--mut);text-align:left;padding:0 10px 9px;
+  border-bottom:1px solid var(--line-2);white-space:nowrap}
+td{padding:11px 10px;border-top:1px solid var(--line);vertical-align:middle}
+tbody tr:hover{background:var(--panel)}
+td:first-child a{color:var(--paper);text-decoration:none;font-family:var(--mono);
+  font-size:12px;border-bottom:1px solid var(--line-2)}
+td:first-child a:hover{color:var(--accent);border-color:var(--accent)}
+td.app{font-weight:500}
+td.n{color:var(--mut);font-family:var(--mono);font-size:11px}
+.ok{color:var(--ok)}
+.warn{color:var(--warn)}
+.none{color:var(--mut)}
+.foot{color:var(--mut);font-size:12px;line-height:1.6;margin-top:26px;max-width:70ch;
+  border-top:1px solid var(--line);padding-top:14px}

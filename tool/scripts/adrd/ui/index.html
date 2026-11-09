@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>adrd - sessions</title>
+<style>
+{{CSS}}
+</style>
+</head>
+<body>
+<header class="slate">
+  <span class="brand"><i></i>adrd<small>rounds</small></span>
+  <div class="crumb"><b>Android rounds</b><span>build, walk, mask, share</span></div>
+</header>
+
+<div class="shell">
+  <div class="intro">
+    <h1>One round, one device.</h1>
+    <p class="lede">Each row is a session folder. Open it to upload the build and spec, run the
+      walk, watch the screen while it goes, cut the session into sections and export the masked
+      video. Everything stays inside <code>sessions/&lt;id&gt;/</code>.</p>
+  </div>
+
+  <section aria-labelledby="how-h">
+    <header class="rule"><h2 id="how-h">How a round goes</h2></header>
+    <ol class="steps">
+      <li><b>Upload the APK</b> under test, up to 200 MB. It lands in the session; nothing installs
+        until you start the run.</li>
+      <li><b>Choose the scope.</b> <b>Focused</b> requires a spec and tests only the steps it names.
+        <b>Full app</b> treats the spec as optional: spec steps first, then every route the source
+        scan found.</li>
+      <li><b>Upload the spec</b> as .md, .txt, .xml or .pdf when you have one. It is the source of
+        the cases, and full scope also merges the routes it never mentions.</li>
+      <li><b>Start the run.</b> It installs the build, cold-starts it, replays the walk while the
+        screen is recorded, masks the branding, burns in the captions, writes the report and
+        builds the bundle.</li>
+      <li><b>Watch it live</b> from the console or from a live link you send. The masked master and
+        one clip per chapter appear as the render finishes.</li>
+      <li><b>Share the masked result.</b> Only the rendered video, section cuts and report leave
+        the session. The raw capture is unmasked.</li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="sessions-h">
+    <header class="rule"><h2 id="sessions-h">Sessions</h2><span class="n">newest state wins</span></header>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>session</th><th>app</th><th>scope</th><th>apk</th>
+          <th>stage</th><th>length</th><th>cuts</th><th>shareable</th>
+        </tr></thead>
+        <tbody>__ROWS__</tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="foot">Bound to __HOST__. The token in this URL is the only access control, and app
+    names appear above, so treat the link as internal. Live frames are unmasked client content.</p>
+</div>
+</body>
+</html>
